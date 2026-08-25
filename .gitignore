@@ -26,6 +26,14 @@ Makefile
 third_party/zoom-sdk/
 third_party/zoom-sdk-extracted/
 
+# Local credentials: Marketplace app key / SDK secret / meeting details.
+# Never committed. See spikes/a-tx-latency/local.env.example.
+local.env
+*.local.env
+
+# Spike measurement output
+*.csv
+
 # Editors / OS
 .vscode/
 .idea/
