@@ -22,7 +22,7 @@ Makefile
 *.pdb
 *.exe
 
-# Zoom SDK: fetched at build time, NEVER committed. See docs/PLAN.md §3.4.
+# Zoom SDK: not redistributable, fetched at build time. See docs/PLAN.md §3.5.
 third_party/zoom-sdk/
 third_party/zoom-sdk-extracted/
 

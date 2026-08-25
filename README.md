@@ -1,40 +1,46 @@
 # ZComms
 
 Standalone intercom for live production, built on the Zoom Meeting SDK.
-Channels, groups, push-to-talk, and — the part nobody else has — a native
+Channels, groups, push-to-talk, and — the part no incumbent offers — a native
 Zoom leg, so a remote Zoom guest sits on the party line without virtual audio
 cables or a spare machine.
 
-**Status: design. No code yet.** Read [`docs/PLAN.md`](docs/PLAN.md) first —
-it argues what the Meeting SDK will and will not let this product be, and
-gates the engineering behind four cheap spikes.
+**Status: design. No code yet.** Read [`docs/PLAN.md`](docs/PLAN.md) first — it
+argues what the Meeting SDK will and will not let this product be, and gates
+the engineering behind four cheap spikes. The decisive one is TX round-trip
+latency measured against a real meeting; above roughly 250 ms one-way, the
+Zoom-transport thesis is dead for live crew and the phasing changes.
 
-## Relationship to CoreVideo
+## Shape
 
-ZComms is its own product and its own repo, sharing the **engine** with
-[CoreVideo](https://github.com/iamfatness/CoreVideo) — the headless process
-that links the Zoom Meeting SDK and moves media over shared memory. The plugin
-and the intercom are two front ends over one engine.
+ZComms links the Zoom Meeting SDK directly. There is no helper process and no
+IPC layer in Phase 1 — the app *is* the client. Multi-channel adds one small
+worker per channel, because the SDK is a per-process singleton and a Zoom
+meeting is a channel.
 
-The rule that makes the split safe: **exactly one audio-send implementation**,
-living in the engine. See [§3 of the plan](docs/PLAN.md) for how the shared
-surface is consumed, and why it starts as a pinned submodule rather than an
-extracted core repo.
+```
+Phase 1   one process   → one meeting  = one channel
+Phase 2   UI + N workers → N meetings  = N channels
+Phase 3   + a native low-latency fabric, Zoom as one leg on it
+```
 
 ## Before the first build
 
-Two things must be settled or the first CI run fails:
+Two things gate shipping rather than coding, and both have lead time:
 
-1. **Zoom SDK access.** The SDK is fetched at build time from a private
-   release asset on the CoreVideo repo. ZComms CI needs cross-repo read access
-   to those releases, or its own copy of the asset. (Plan §3.4)
-2. **A second Zoom Marketplace identity.** Own client id, public app key,
-   redirect URI and broker route — a review cycle with lead time. (Plan §3.5)
+1. **A Zoom Marketplace app identity** — a General app with user-managed OAuth
+   and Meeting SDK / Embed enabled, its own client id, public app key and
+   redirect URI, plus a broker endpoint so no end user ever types app
+   credentials. Start the review before Phase 1 code lands.
+2. **The Meeting SDK itself** — not redistributable in a public repo, so
+   `third_party/zoom-sdk/` is gitignored and CI fetches it at build time from a
+   private release asset on this repository. Settle that step before the first
+   CI run.
 
 ## Layout
 
 ```
-docs/PLAN.md    the architecture and phasing decision
+docs/PLAN.md    the architecture, phasing and admin-model decision
 ```
 
 Everything else arrives with Phase 1.
