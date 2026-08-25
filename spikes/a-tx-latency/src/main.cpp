@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <random>
 #include <thread>
@@ -409,8 +410,10 @@ int DoMeasure(const Config& cfg) {
   }
   std::printf("[sdk] authenticated\n");
 
+  std::printf("[sdk] joining as \"%s\" -- admit it if a waiting room is on\n",
+              cfg.display_name.c_str());
   if (!zoom.Join(cfg.meeting_number, cfg.meeting_password, cfg.display_name,
-                 60000, &err)) {
+                 cfg.join_timeout_s * 1000, &err)) {
     std::printf("ERROR: %s\n", err.c_str());
     zoom.Cleanup();
     return 1;
@@ -492,6 +495,18 @@ namespace {
 }  // namespace zc
 
 int main(int argc, char** argv) {
+  // Unbuffered stdout. The default when stdout is a pipe or a file is 4 KB
+  // block buffering, which for a run that prints a progress line every 15
+  // seconds means the log stays empty for minutes and then arrives all at
+  // once. During the first live runs that made a harness sitting in a waiting
+  // room indistinguishable from one that had joined and was measuring.
+  //
+  // _IONBF, not _IOLBF: on Win32 the CRT documents _IOLBF as behaving the
+  // same as full buffering, so line buffering silently does nothing here.
+  // Progress output is a handful of lines a minute -- unbuffered costs
+  // nothing and is the only setting that actually works on this platform.
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+
   zc::Config cfg;
   std::string error;
   if (!zc::ParseConfig(argc, argv, &cfg, &error)) {

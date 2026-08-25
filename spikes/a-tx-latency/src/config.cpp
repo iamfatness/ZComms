@@ -77,6 +77,8 @@ OPTIONS
   --meeting <url|id>      Meeting to join. Accepts a join URL or a raw id.
   --passcode <pw>         Meeting passcode (parsed from the URL if present).
   --duration <seconds>    Measurement length. Default 300.
+  --join-timeout <secs>   How long to wait to get into the meeting. Default
+                          180 -- a waiting room needs a human to click admit.
   --loopback-device <s>   Substring of the output device the second Zoom
                           client is playing to. Default: system default.
   --csv <path>            Write per-burst samples for offline inspection.
@@ -139,6 +141,9 @@ bool ParseConfig(int argc, char** argv, Config* out, std::string* error) {
     } else if (a == "--duration") {
       if (!need("--duration")) return false;
       out->duration_s = std::atoi(argv[++i]);
+    } else if (a == "--join-timeout") {
+      if (!need("--join-timeout")) return false;
+      out->join_timeout_s = std::atoi(argv[++i]);
     } else if (a == "--loopback-device") {
       if (!need("--loopback-device")) return false;
       out->loopback_device = argv[++i];

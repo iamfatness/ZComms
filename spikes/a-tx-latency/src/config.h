@@ -36,6 +36,10 @@ struct Config {
 
   std::string loopback_device;  // substring match; empty = default output
   int duration_s = 300;
+  // Generous by default. A waiting room turns joining into a human action --
+  // the host has to notice the request and click admit -- and timing out
+  // underneath that reads as a harness failure when it is just impatience.
+  int join_timeout_s = 180;
   std::string csv_path;
   bool verbose = false;
 
