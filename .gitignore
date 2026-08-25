@@ -1,0 +1,38 @@
+# Build output
+build/
+build-*/
+build_*/
+dist/
+.cache/
+
+# CMake artefacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!cmake/*.cmake
+
+# Compiled output
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.pdb
+*.exe
+
+# Zoom SDK: fetched at build time, NEVER committed. See docs/PLAN.md §3.4.
+third_party/zoom-sdk/
+third_party/zoom-sdk-extracted/
+
+# Editors / OS
+.vscode/
+.idea/
+.claude/
+*.user
+.DS_Store
+
+# Dependencies
+node_modules/
+__pycache__/
