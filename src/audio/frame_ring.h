@@ -28,13 +28,18 @@ namespace zc {
 struct TxFrame {
   int16_t pcm[kFrameSamples];
   uint64_t seq = 0;
-  // -1 when the frame carries no burst onset. Carrying the marker on the frame
-  // is what lets the emission timestamp be taken at the send() call itself
-  // rather than inferred from a schedule -- the number we want is when the
-  // audio was handed to Zoom, not when we intended to hand it over.
-  int32_t burst_id = -1;
-  int32_t burst_offset = 0;  // onset offset within this frame, in samples
-  bool burst_up = true;
+
+  // An optional opaque marker riding with the frame. -1 means unmarked, which
+  // is the normal case for live audio.
+  //
+  // It exists so a producer can ask "tell me the exact instant this particular
+  // audio was handed over", and get an answer taken at the send() call itself
+  // rather than inferred from a schedule. Spike A uses it to timestamp probe
+  // bursts; the meaning of the id and the flag belong entirely to whoever set
+  // them.
+  int32_t mark_id = -1;
+  int32_t mark_offset = 0;  // offset of the marked instant within this frame
+  bool mark_flag = false;   // one bit of producer-defined payload
 };
 
 class FrameRing {

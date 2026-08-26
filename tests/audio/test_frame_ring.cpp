@@ -26,7 +26,7 @@ void TestFrameRing() {
 
   {
     ZC_TEST("overflow drops the oldest and counts it");
-    // Plan §6.2's contract. Dropping the newest instead would mean a stalled
+    // Plan section 6.2. Dropping the newest instead would mean a stalled
     // consumer permanently serves stale audio, which in a talkback path is
     // worse than a gap.
     FrameRing r(4);
@@ -39,13 +39,11 @@ void TestFrameRing() {
     ZC_CHECK(r.drops() == 2);
     TxFrame out;
     ZC_CHECK(r.Pop(&out));
-    ZC_CHECK(out.seq == 2);  // 0 and 1 were dropped
+    ZC_CHECK(out.seq == 2);
   }
 
   {
-    ZC_TEST("frame markers survive the round trip");
-    // The emission timestamp is keyed off these; losing them would silently
-    // reduce the sample count with no other symptom.
+    ZC_TEST("markers survive the round trip");
     FrameRing r(2);
     TxFrame f;
     f.mark_id = 7;
@@ -57,5 +55,24 @@ void TestFrameRing() {
     ZC_CHECK(out.mark_id == 7);
     ZC_CHECK(out.mark_flag == false);
     ZC_CHECK(out.mark_offset == 123);
+  }
+
+  {
+    ZC_TEST("audio payload survives intact");
+    // The ring is the last thing between processed audio and Zoom; a payload
+    // bug here would sound like corruption with no counter to explain it.
+    FrameRing r(2);
+    TxFrame f;
+    for (int i = 0; i < kFrameSamples; ++i) {
+      f.pcm[i] = static_cast<int16_t>((i * 37) % 32767 - 16000);
+    }
+    r.Push(f);
+    TxFrame out;
+    ZC_CHECK(r.Pop(&out));
+    bool same = true;
+    for (int i = 0; i < kFrameSamples; ++i) {
+      if (out.pcm[i] != f.pcm[i]) { same = false; break; }
+    }
+    ZC_CHECK(same);
   }
 }

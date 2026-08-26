@@ -51,8 +51,8 @@ void SignalGenerator::Run() {
 
     TxFrame f;
     f.seq = seq;
-    f.burst_id = -1;
-    f.burst_offset = 0;
+    f.mark_id = -1;
+    f.mark_offset = 0;
 
     // Bursts are frame-aligned and may span more than one frame; frame 0 of
     // each period carries the onset, subsequent frames carry the remainder.
@@ -67,8 +67,10 @@ void SignalGenerator::Run() {
         if (idx < burst.size()) scratch[static_cast<size_t>(i)] += burst[idx];
       }
       if (frame_in_period == 0) {
-        f.burst_id = burst_id;
-        f.burst_up = up;
+        // The probe burst is the marked instant; the up/down sweep direction
+        // rides in the mark's one flag bit.
+        f.mark_id = burst_id;
+        f.mark_flag = up;
         bursts_queued_.fetch_add(1);
       }
       if (frame_in_period == burst_frames - 1) ++burst_id;

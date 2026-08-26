@@ -6,13 +6,39 @@ same change as any substantive work — docs-updated is part of done.
 
 ## Where things stand
 
-**Phase 0. The only code here is the Spike A harness**
-(`spikes/a-tx-latency/`). Nothing in `docs/PLAN.md` beyond that is
-implemented, Phase 1 has not started, and two spikes still carry kill criteria
-that can invalidate the architecture.
+Two things exist: the **Spike A harness** (`spikes/a-tx-latency/`) and the
+**audio engine core** (`src/audio/`, plan §6.1–6.3). There is no app shell, no
+UI, no channels, no admin, no packaging, and Phase 1 has not started. Two
+spikes still carry kill criteria that can invalidate the architecture.
 
 Before writing code, read `docs/PLAN.md` end to end. It exists specifically to
 stop work starting in the wrong place.
+
+### The audio engine (`src/audio/`)
+
+Built and verified on real hardware. The chain, and the order is load-bearing:
+
+```
+capture -> input gain -> limiter -> PTT envelope -> sidetone tap
+        -> 20 ms frames -> ring -> TX pacer -> FrameSink
+```
+
+- The limiter sits **before** the PTT envelope so gain reduction does not pump
+  against the ramp depending on whether PTT is held.
+- The sidetone tap is **after** the envelope, so it monitors what is actually
+  being sent. Silence while not transmitting is correct, not a bug.
+- `FrameSink` is the seam. `ZoomMicSource` is one implementation; `WavSink` is
+  the other, and it is what lets the whole engine be exercised with no meeting
+  and no SDK. Use it — the properties that matter here are properties of a
+  waveform.
+
+Verified: 22/22 unit tests; on a real GoXLR, 363 ticks / 363 sends /
+0 underruns / 0 ring drops, 20 ms grid held to 0.38 ms worst lateness, and a
+scripted PTT cycle produces clean gating in the recorded WAV with no clipping.
+
+`zcomms-engine --help` drives all of it. `--ptt-cycle <on,off>` scripts the
+press/release pattern so ramp behaviour is inspectable without a person
+holding a key.
 
 ### Spike A — TX latency harness
 
