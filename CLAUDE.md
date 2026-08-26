@@ -40,13 +40,39 @@ scripted PTT cycle produces clean gating in the recorded WAV with no clipping.
 press/release pattern so ramp behaviour is inspectable without a person
 holding a key.
 
-### Spike A — TX latency harness
+### Spike A — RESULT: the thesis survives
 
-Built and verified, **but the decisive number does not exist yet.** The
-harness runs; it has not yet completed a measurement against a live meeting.
-See `spikes/a-tx-latency/README.md` for the method and how to re-run.
+Measured live 2026-08-26 against a real meeting, over the **talkback
+transport** (`IMeetingTalkbackController::SendAudioDataToChannel`, which the
+product now prefers — see below):
 
-Verified on this machine:
+- **median 165.0 ms, p95 193.6 ms** one-way, harness → channel → a plain
+  Zoom client's output. 55 samples, MAD 4.2 ms, jitter (p95−p50) 28.6 ms.
+- Both inside plan §9's ~250 ms kill criterion. Bracketed against the 33.2 ms
+  local bias: true Zoom-path median in (132, 165] ms.
+
+Established alongside the number, each live-verified:
+
+- **The product's TX path is talkback channels, not the virtual mic.** The
+  owner's goal is "talk to the panelists inside the client's meeting";
+  `IMeetingTalkbackController` (SDK ≥7.0) does channel routing *inside* one
+  meeting — which supersedes plan §1's premise that routing cannot exist
+  there. Max 16 channels, 10 listeners each, per-channel meeting ducking.
+- **Talkback works under PKCE public-app-key auth.** No JWT, no client
+  secret, no raw-data license. The virtual mic's send window never opened
+  under this auth (`HasRawdataLicense()` false); if the party-line/virtual-mic
+  case ever matters, expect it to need JWT auth.
+- **Channel creation needs co-host role** (`SDKERR_NO_PERMISSION`, 12, as a
+  guest; works seconds after promotion). No account entitlement beyond that —
+  `IsMeetingSupportTalkBack()` was true on an ordinary account.
+- **A plain Zoom client hears channel audio with no app installed.**
+- **The receiving client renders talkback to the default-communications
+  endpoint** (the GoXLR "Music" bus on this machine), *not* its configured
+  speaker device. Cost several runs; the harness's `--tap-all` mode (taps
+  every playback endpoint at once, each with its own correlator) exists
+  because of it and ends that class of failure permanently.
+
+Verified before the live run:
 
 - `spike_a_tests` — 22/22.
 - `--self-test` recovers known delays of 45/150/275/600 ms to within 0.1 ms

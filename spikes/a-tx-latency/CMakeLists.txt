@@ -51,6 +51,7 @@ if(ZCOMMS_HAVE_SDK)
     src/main.cpp
     src/loopback.cpp
     src/zoom_client.cpp
+    src/talkback_source.cpp
     src/config.cpp
     src/jwt.cpp
   )

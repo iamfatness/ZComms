@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <fstream>
 #include <random>
 #include <thread>
@@ -28,7 +29,9 @@
 #include "probe.h"
 #include "signal.h"
 #include "stats.h"
+#include "talkback_source.h"
 #include "tx_pacer.h"
+#include "wav_sink.h"
 #include "zoom_client.h"
 
 #pragma comment(lib, "winmm.lib")
@@ -70,6 +73,11 @@ void PrintSummary(const char* title, const Summary& s, const ProbeStats& ps,
                   : "");
   std::printf("  capture rate     %.1f Hz (nominal %d)\n",
               ps.measured_capture_rate_hz, kSampleRate);
+  if (ps.no_detection > 0) {
+    std::printf("  best failed corr peak=%.3f psr=%.2f  (gates: peak>=%.2f "
+                "psr>=%.1f)\n",
+                ps.best_failed_peak, ps.best_failed_psr, 0.15, 3.0);
+  }
   std::printf("  TX ticks         %llu\n", (unsigned long long)tx.ticks);
   std::printf("  TX sends         %llu\n", (unsigned long long)tx.sends);
   std::printf("  TX underruns     %llu\n", (unsigned long long)tx.underruns);
@@ -141,11 +149,35 @@ RunResult RunMeasurement(FrameSink* sink, const Config& cfg, int duration_s,
   ProbeConfig pcfg;
   LatencyProbe probe(&gen.burst_up(), &gen.burst_down(), pcfg);
 
+  // Optional tee of the tapped audio to disk. Conversion to int16 happens
+  // here rather than in the audio callback path proper -- it is cheap, and
+  // the WAV write itself is buffered stdio.
+  WavWriter dump;
+  if (!cfg.dump_capture_path.empty()) {
+    std::string dump_err;
+    if (dump.Open(cfg.dump_capture_path, kSampleRate, 1, &dump_err)) {
+      std::printf("  dumping tapped audio to %s\n", cfg.dump_capture_path.c_str());
+    } else {
+      std::printf("  (%s -- continuing without the dump)\n", dump_err.c_str());
+    }
+  }
+  std::vector<int16_t> dump_scratch;
+
   LoopbackCapture capture;
   std::string cap_err;
   if (!capture.Start(cfg.loopback_device,
-                     [&probe](const float* mono, int frames, int64_t host_ns) {
+                     [&probe, &dump, &dump_scratch](const float* mono, int frames,
+                                                    int64_t host_ns) {
                        probe.OnCapture(mono, frames, host_ns);
+                       if (dump.open() && frames > 0) {
+                         dump_scratch.resize(static_cast<size_t>(frames));
+                         for (int i = 0; i < frames; ++i) {
+                           const float v = std::max(-1.0f, std::min(1.0f, mono[i]));
+                           dump_scratch[static_cast<size_t>(i)] =
+                               static_cast<int16_t>(std::lrintf(v * 32767.0f));
+                         }
+                         dump.Write(dump_scratch.data(), frames);
+                       }
                      },
                      &cap_err)) {
     std::printf("  ERROR: %s\n", cap_err.c_str());
@@ -208,10 +240,11 @@ RunResult RunMeasurement(FrameSink* sink, const Config& cfg, int duration_s,
                     (unsigned long long)ps.data_gap);
       } else {
         std::printf("  [%llds left] no samples yet -- emitted=%llu miss=%llu "
-                    "gap=%llu rms=%.5f\n",
+                    "gap=%llu rms=%.5f best-miss peak=%.3f psr=%.2f\n",
                     (long long)remaining_s, (unsigned long long)ps.emitted,
                     (unsigned long long)ps.no_detection,
-                    (unsigned long long)ps.data_gap, ps.capture_rms);
+                    (unsigned long long)ps.data_gap, ps.capture_rms,
+                    ps.best_failed_peak, ps.best_failed_psr);
       }
     }
   }
@@ -233,6 +266,144 @@ RunResult RunMeasurement(FrameSink* sink, const Config& cfg, int duration_s,
   std::vector<double> lat;
   for (const auto& s : result.samples) lat.push_back(s.latency_ms);
   result.summary = Summarise(lat);
+  return result;
+}
+
+// Multi-tap: every playback endpoint gets its own loopback and its own
+// LatencyProbe, every emission fans out to all of them, and whichever
+// endpoint the far client is genuinely rendering to resolves samples. The
+// rest stay silent or unmatched. One run replaces the entire guessing game,
+// and the winning tap's distribution IS the measurement.
+struct MultiTapResult {
+  std::string winner;
+  Summary summary;
+  ProbeStats probe_stats;
+  PacerStats pacer_stats;
+  std::vector<LatencySample> samples;
+  bool any_capture_ok = false;
+};
+
+MultiTapResult RunMeasurementMultiTap(FrameSink* sink, const Config& cfg,
+                                      int duration_s, ZoomClient* zoom) {
+  MultiTapResult result;
+  SignalParams sp;
+
+  FrameRing ring(50);
+  SignalGenerator gen(&ring, sp);
+
+  struct Tap {
+    std::string name;
+    std::unique_ptr<LoopbackCapture> capture;
+    std::unique_ptr<LatencyProbe> probe;
+  };
+  std::vector<Tap> taps;
+  ProbeConfig pcfg;
+
+  for (const AudioDeviceInfo& d : ListPlaybackDevices()) {
+    Tap t;
+    t.name = d.name;
+    t.capture = std::make_unique<LoopbackCapture>();
+    t.probe = std::make_unique<LatencyProbe>(&gen.burst_up(), &gen.burst_down(),
+                                             pcfg);
+    LatencyProbe* probe = t.probe.get();
+    std::string cap_err;
+    if (!t.capture->Start(d.name,
+                          [probe](const float* mono, int frames, int64_t ns) {
+                            probe->OnCapture(mono, frames, ns);
+                          },
+                          &cap_err)) {
+      std::printf("  (skipping %s: %s)\n", d.name.c_str(), cap_err.c_str());
+      continue;
+    }
+    std::printf("  tapping: %s\n", t.name.c_str());
+    taps.push_back(std::move(t));
+  }
+  if (taps.empty()) {
+    std::printf("  ERROR: no endpoint could be tapped\n");
+    return result;
+  }
+  result.any_capture_ok = true;
+
+  gen.Start();
+  TxPacer pacer(&ring, sink, [&taps](int32_t id, bool up, int64_t ns) {
+    for (Tap& t : taps) t.probe->OnEmission(id, up, ns);
+  });
+  pacer.Start(3, 500);
+
+  std::atomic<bool> resolving{true};
+  std::thread resolver([&] {
+    while (resolving.load()) {
+      for (Tap& t : taps) t.probe->Resolve();
+      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+  });
+
+  const int64_t end_ns = NowNs() + static_cast<int64_t>(duration_s) * 1'000'000'000LL;
+  int64_t next_report_ns = NowNs() + 15'000'000'000LL;
+
+  while (NowNs() < end_ns) {
+    if (zoom != nullptr) {
+      zoom->Pump(200);
+      if (!zoom->in_meeting()) {
+        std::printf("  meeting state changed to %s -- stopping early\n",
+                    MeetingStatusName(zoom->status()));
+        break;
+      }
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    if (NowNs() >= next_report_ns) {
+      next_report_ns = NowNs() + 15'000'000'000LL;
+      const int64_t remaining_s = (end_ns - NowNs()) / 1'000'000'000LL;
+      std::printf("  [%llds left]\n", (long long)remaining_s);
+      for (Tap& t : taps) {
+        const ProbeStats ps = t.probe->stats();
+        std::printf("    %-32s n=%llu miss=%llu rms=%.5f best=%.2f/%.1f\n",
+                    t.name.c_str(), (unsigned long long)ps.resolved,
+                    (unsigned long long)ps.no_detection, ps.capture_rms,
+                    ps.best_failed_peak, ps.best_failed_psr);
+      }
+    }
+  }
+
+  pacer.Stop();
+  gen.Stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+  resolving.store(false);
+  resolver.join();
+  for (Tap& t : taps) {
+    t.probe->Resolve();
+    t.capture->Stop();
+  }
+
+  // The winner is the tap with the most resolved samples.
+  size_t best_idx = 0;
+  uint64_t best_n = 0;
+  for (size_t i = 0; i < taps.size(); ++i) {
+    const uint64_t n = taps[i].probe->stats().resolved;
+    if (n > best_n) {
+      best_n = n;
+      best_idx = i;
+    }
+  }
+  std::printf("\n  -- per-endpoint outcome --\n");
+  for (Tap& t : taps) {
+    const ProbeStats ps = t.probe->stats();
+    std::printf("    %-32s resolved=%llu miss=%llu best-miss=%.2f/%.1f\n",
+                t.name.c_str(), (unsigned long long)ps.resolved,
+                (unsigned long long)ps.no_detection, ps.best_failed_peak,
+                ps.best_failed_psr);
+  }
+  if (best_n > 0) {
+    Tap& w = taps[best_idx];
+    result.winner = w.name;
+    result.samples = w.probe->samples();
+    result.probe_stats = w.probe->stats();
+    std::vector<double> lat;
+    for (const auto& s : result.samples) lat.push_back(s.latency_ms);
+    result.summary = Summarise(lat);
+  }
+  result.pacer_stats = pacer.stats();
   return result;
 }
 
@@ -420,38 +591,184 @@ int DoMeasure(const Config& cfg) {
   }
   std::printf("[sdk] in meeting\n");
 
+  // Both transports exist for the run's lifetime; only one is the sink.
   ZoomMicSource mic;
-  if (!zoom.InstallVirtualMic(&mic, &err)) {
-    std::printf("ERROR: %s\n", err.c_str());
-    zoom.Leave();
-    zoom.Cleanup();
-    return 1;
+  std::unique_ptr<ZoomTalkbackSource> talkback;
+  FrameSink* sink = nullptr;
+
+  if (cfg.transport == Transport::kVirtualMic) {
+    if (!zoom.InstallVirtualMic(&mic, &err)) {
+      std::printf("ERROR: %s\n", err.c_str());
+      zoom.Leave();
+      zoom.Cleanup();
+      return 1;
+    }
+    sink = &mic;
+  } else {
+    talkback = std::make_unique<ZoomTalkbackSource>(zoom.GetTalkbackController());
+    sink = talkback.get();
   }
+
   if (!zoom.JoinVoip(&err)) {
     std::printf("WARNING: %s (continuing -- audio may already be joined)\n",
                 err.c_str());
   }
 
-  // The virtual mic's callbacks arrive on the message pump, so give them a
-  // chance before deciding anything is wrong.
-  std::printf("[sdk] waiting for the virtual mic to initialise...\n");
-  for (int i = 0; i < 100 && !mic.CanSend(); ++i) zoom.Pump(100);
-  if (!mic.CanSend()) {
-    std::printf("WARNING: the send window never opened (onMicStartSend not\n"
-                "         seen). Continuing -- every tick will be counted as\n"
-                "         gated, which is the diagnostic you want.\n");
+  if (cfg.transport == Transport::kTalkback) {
+    // Talkback bring-up: create one channel, invite everyone else in the
+    // meeting, and wait for at least one confirmed join. Every step is
+    // asynchronous with a per-step error callback, so a failure names itself
+    // rather than presenting as a hang.
+    std::printf("[talkback] meeting supports talkback: %s\n",
+                talkback->meeting_supports_talkback() ? "yes" : "NO");
+
+    // Channel creation is a host/co-host power (live-verified: a guest gets
+    // SDKERR_NO_PERMISSION, 12). Promotion is a human action in the host's
+    // participant list, so failure here retries on a loop with the exact
+    // instruction printed, rather than exiting and costing a rejoin.
+    bool created = false;
+    for (int attempt = 0; attempt < 40 && !created; ++attempt) {
+      if (!talkback->CreateChannel(&err)) {
+        std::printf("[talkback] CreateChannel: %s\n", err.c_str());
+        std::printf("  >>> promote \"%s\" to CO-HOST in the participant list; "
+                    "retrying in 5s (%d/40)\n",
+                    cfg.display_name.c_str(), attempt + 1);
+        zoom.Pump(5000);
+        continue;
+      }
+      for (int i = 0; i < 100 && !talkback->channel_ready(); ++i) zoom.Pump(100);
+      created = talkback->channel_ready();
+      if (!created) {
+        std::printf("[talkback] channel not confirmed%s%s -- retrying in 5s "
+                    "(%d/40)\n",
+                    talkback->last_error().empty() ? "" : ": ",
+                    talkback->last_error().c_str(), attempt + 1);
+        zoom.Pump(5000);
+      }
+    }
+    if (!created) {
+      std::printf("ERROR: could not create a talkback channel. If the\n"
+                  "       co-host promotion was done, the remaining gate is\n"
+                  "       account entitlement on the host, which is a real\n"
+                  "       spike result rather than a harness fault.\n");
+      zoom.Leave();
+      zoom.Cleanup();
+      return 1;
+    }
+
+    const std::vector<unsigned int> others = zoom.GetOtherParticipants();
+    std::printf("[talkback] inviting %zu participant(s)\n", others.size());
+    if (others.empty()) {
+      std::printf("ERROR: nobody else is in the meeting to invite\n");
+      zoom.Leave();
+      zoom.Cleanup();
+      return 1;
+    }
+    if (!talkback->InviteUsers(others, &err)) {
+      std::printf("ERROR: %s\n", err.c_str());
+      zoom.Leave();
+      zoom.Cleanup();
+      return 1;
+    }
+    for (int i = 0; i < 150 && talkback->users_joined() == 0; ++i) zoom.Pump(100);
+    if (talkback->users_joined() == 0) {
+      std::printf("ERROR: no participant joined the channel after 15s%s%s\n",
+                  talkback->last_error().empty() ? "" : ": ",
+                  talkback->last_error().c_str());
+      zoom.Leave();
+      zoom.Cleanup();
+      return 1;
+    }
+    // Full duck: the probe should reach the listener as cleanly as possible,
+    // and there is no meeting audio worth hearing under it.
+    talkback->SetBackgroundVolume(0.0f);
+    std::printf("[talkback] channel %s live with %d listener(s) -- measuring\n",
+                talkback->channel_id().c_str(), talkback->users_joined());
+  } else {
+    // Virtual-mic bring-up: the send window (onMicStartSend) opens only once
+    // the client is in VoIP audio AND unmuted, and each stage below was
+    // learned against a real meeting rather than from documentation.
+    //
+    // A mute-on-entry meeting admits the harness muted, and a muted client's
+    // virtual mic is never asked to send -- so stage two unmutes explicitly
+    // (self-unmute, because host-side unmute of an SDK client arrives as a
+    // consent request; onHostRequestStartAudio now accepts those too). If the
+    // window still stays shut, stage three cycles VoIP: an audio join that
+    // raced the setExternalAudioSource call can leave the mic installed but
+    // never started, and rejoining re-runs that handshake with the mic in
+    // place.
+    std::printf("[sdk] waiting for the send window to open...\n");
+    for (int i = 0; i < 50 && !mic.CanSend(); ++i) zoom.Pump(100);
+
+    if (!mic.CanSend()) {
+      zoom.LogSelfAudioState("after JoinVoip");
+      std::printf("[sdk] window shut after 5s -- unmuting self\n");
+      if (!zoom.UnmuteSelf(&err)) {
+        std::printf("WARNING: %s\n", err.c_str());
+      }
+      for (int i = 0; i < 100 && !mic.CanSend(); ++i) zoom.Pump(100);
+    }
+
+    if (!mic.CanSend()) {
+      zoom.LogSelfAudioState("after unmute");
+      std::printf("[sdk] window still shut -- cycling VoIP audio\n");
+      if (zoom.LeaveVoip(&err)) {
+        zoom.Pump(1000);
+        if (!zoom.JoinVoip(&err)) std::printf("WARNING: %s\n", err.c_str());
+        zoom.Pump(1000);
+        if (!zoom.UnmuteSelf(&err)) std::printf("WARNING: %s\n", err.c_str());
+      } else {
+        std::printf("WARNING: %s\n", err.c_str());
+      }
+      for (int i = 0; i < 100 && !mic.CanSend(); ++i) zoom.Pump(100);
+    }
+
+    if (mic.CanSend()) {
+      std::printf("[sdk] send window OPEN -- measuring\n");
+    } else {
+      zoom.LogSelfAudioState("window never opened");
+      std::printf("WARNING: the send window never opened (onMicStartSend not\n"
+                  "         seen). Continuing -- every tick will be counted as\n"
+                  "         gated, which is the diagnostic you want.\n");
+    }
   }
 
-  const RunResult r = RunMeasurement(&mic, cfg, cfg.duration_s, &zoom);
+  if (cfg.tap_all) {
+    const MultiTapResult mt = RunMeasurementMultiTap(sink, cfg, cfg.duration_s, &zoom);
+    zoom.Leave();
+    zoom.Cleanup();
+    if (!mt.any_capture_ok) return 1;
+    if (mt.winner.empty()) {
+      std::printf("\n  NO endpoint resolved the probe. The far client is not\n"
+                  "  rendering it to any WASAPI endpoint this process can tap.\n");
+      return 1;
+    }
+    std::printf("\n  >>> the probe arrives on: %s\n", mt.winner.c_str());
+    PrintSummary("ONE-WAY LATENCY: talkback channel -> second Zoom client",
+                 mt.summary, mt.probe_stats, mt.pacer_stats);
+    PrintVerdict(mt.summary);
+    if (!cfg.csv_path.empty()) WriteCsv(cfg.csv_path, mt.samples);
+    return 0;
+  }
+
+  const RunResult r = RunMeasurement(sink, cfg, cfg.duration_s, &zoom);
 
   zoom.Leave();
   zoom.Cleanup();
 
   if (!r.capture_ok) return 1;
-  PrintSummary("ONE-WAY LATENCY: ZComms virtual mic -> second Zoom client",
+  PrintSummary(cfg.transport == Transport::kTalkback
+                   ? "ONE-WAY LATENCY: talkback channel -> second Zoom client"
+                   : "ONE-WAY LATENCY: ZComms virtual mic -> second Zoom client",
                r.summary, r.probe_stats, r.pacer_stats);
-  std::printf("  mic send failures %llu (last SDKError %d)\n",
-              (unsigned long long)mic.send_failures(), mic.last_error());
+  if (cfg.transport == Transport::kTalkback) {
+    std::printf("  talkback send failures %llu (last SDKError %d)\n",
+                (unsigned long long)talkback->send_failures(),
+                talkback->last_send_error());
+  } else {
+    std::printf("  mic send failures %llu (last SDKError %d)\n",
+                (unsigned long long)mic.send_failures(), mic.last_error());
+  }
   PrintVerdict(r.summary);
   if (!cfg.csv_path.empty()) WriteCsv(cfg.csv_path, r.samples);
   return 0;

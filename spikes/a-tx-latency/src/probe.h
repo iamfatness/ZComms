@@ -55,6 +55,13 @@ struct ProbeStats {
   uint64_t pending = 0;
   double capture_rms = 0.0;  // distinguishes "no audio" from "audio, no match"
   double measured_capture_rate_hz = 0.0;
+  // The best correlation any failed burst achieved, and the gates it faced.
+  // This is what separates "the probe is not in this audio at all" (peak near
+  // the noise floor) from "the probe is there but degraded below the gate"
+  // (peak just under min_peak, or PSR just under min_psr) -- two failures
+  // with opposite fixes.
+  double best_failed_peak = 0.0;
+  double best_failed_psr = 0.0;
 };
 
 class LatencyProbe {
