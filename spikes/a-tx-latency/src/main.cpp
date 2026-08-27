@@ -299,7 +299,7 @@ MultiTapResult RunMeasurementMultiTap(FrameSink* sink, const Config& cfg,
   std::vector<Tap> taps;
   ProbeConfig pcfg;
 
-  for (const AudioDeviceInfo& d : ListPlaybackDevices()) {
+  for (const DeviceInfo& d : ListPlaybackDevices()) {
     Tap t;
     t.name = d.name;
     t.capture = std::make_unique<LoopbackCapture>();

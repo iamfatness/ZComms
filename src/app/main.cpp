@@ -14,6 +14,8 @@
 #include <timeapi.h>
 #include <conio.h>
 
+#include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -21,14 +23,17 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "audio_defs.h"
 #include "clock.h"
 #include "devices.h"
 #include "engine.h"
+#include "frame_ring.h"
 #include "roster.h"
 #include "talkback_source.h"
+#include "tx_pacer.h"
 #include "zoom_client.h"
 
 #pragma comment(lib, "winmm.lib")
@@ -53,6 +58,15 @@ struct AppConfig {
   std::string monitor_device;  // sidetone output, substring match
   double gain_db = 0.0;
   bool sidetone = true;
+  // Start with talk latched on. For unattended verification, and for an
+  // operator who wants an open channel rather than PTT.
+  bool start_latched = false;
+  // Replace the microphone with an internally generated 700/1000 Hz beep
+  // pattern. Exists so an automated end-to-end run can prove
+  // engine -> channel -> listener with a signal a detector can find; the mic
+  // capture path itself is verified separately on hardware.
+  bool test_signal = false;
+  int run_seconds = 0;  // 0 = run until Q
 };
 
 std::string Trim(const std::string& s) {
@@ -192,6 +206,9 @@ int Run(int argc, char** argv) {
     else if (a == "--out") cfg.monitor_device = next("--out");
     else if (a == "--no-sidetone") cfg.sidetone = false;
     else if (a == "--gain") cfg.gain_db = std::atof(next("--gain"));
+    else if (a == "--latch") cfg.start_latched = true;
+    else if (a == "--test-signal") cfg.test_signal = true;
+    else if (a == "--seconds") cfg.run_seconds = std::atoi(next("--seconds"));
     else {
       std::printf("ERROR: unknown argument %s\n\n", a.c_str());
       PrintUsage();
@@ -277,22 +294,80 @@ int Run(int argc, char** argv) {
   channel.SetBackgroundVolume(0.2f);  // duck, don't erase, the meeting
   std::printf("[zoom] channel up\n");
 
-  // --- Audio engine ---------------------------------------------------------
-  EngineConfig ecfg;
-  ecfg.capture_device = cfg.mic_device;
-  ecfg.monitor_device = cfg.monitor_device;
-  ecfg.monitor_enabled = cfg.sidetone;
-  ecfg.input_gain_db = cfg.gain_db;
-  AudioEngine engine(ecfg, &channel);
-  if (!engine.Start(&err)) {
-    std::printf("ERROR: %s\n", err.c_str());
-    zoom.Leave();
-    zoom.Cleanup();
-    return 1;
-  }
-  std::printf("[audio] mic: %s\n", engine.capture_device_name().c_str());
-  if (cfg.sidetone) {
-    std::printf("[audio] sidetone: %s\n", engine.monitor_device_name().c_str());
+  // --- Audio path -----------------------------------------------------------
+  // Normal mode: the engine, mic through gain/limiter/PTT into the channel.
+  // Test mode: an internally generated beep pattern through the same ring and
+  // pacer, so the paced TX path is exercised identically -- only the source
+  // differs.
+  std::unique_ptr<AudioEngine> engine;
+  std::unique_ptr<FrameRing> test_ring;
+  std::unique_ptr<TxPacer> test_pacer;
+  std::atomic<bool> test_running{false};
+  std::thread test_gen;
+
+  if (cfg.test_signal) {
+    std::printf("[audio] TEST SIGNAL mode: 700/1000 Hz beep pattern\n");
+    test_ring = std::make_unique<FrameRing>(50);
+    test_pacer = std::make_unique<TxPacer>(test_ring.get(), &channel, nullptr);
+    test_running.store(true);
+    test_gen = std::thread([&test_ring, &test_running]() {
+      // 300 ms beep, 200 ms gap, alternating 700 and 1000 Hz, -12 dBFS, with
+      // 10 ms raised-cosine edges so the pattern is click-free like real PTT
+      // audio would be.
+      const double kAmp = 0.25;
+      const int beep = 48 * 300, gap = 48 * 200, ramp = 48 * 10;
+      uint64_t seq = 0;
+      int pos = 0;
+      bool high = false;
+      const int64_t period_ns = 20'000'000;
+      const int64_t start = NowNs();
+      int64_t produced = 0;
+      while (test_running.load()) {
+        TxFrame f;
+        f.seq = seq++;
+        for (int i = 0; i < kFrameSamples; ++i) {
+          double v = 0.0;
+          if (pos < beep) {
+            const double f_hz = high ? 1000.0 : 700.0;
+            double w = 1.0;
+            if (pos < ramp) w = 0.5 * (1.0 - std::cos(3.14159265 * pos / ramp));
+            else if (pos >= beep - ramp)
+              w = 0.5 * (1.0 - std::cos(3.14159265 * (beep - 1 - pos) / ramp));
+            v = kAmp * w *
+                std::sin(2.0 * 3.14159265 * f_hz * (pos / 48000.0));
+          }
+          f.pcm[i] = static_cast<int16_t>(v * 32767.0);
+          if (++pos >= beep + gap) {
+            pos = 0;
+            high = !high;
+          }
+        }
+        test_ring->Push(f);
+        ++produced;
+        const int64_t target = start + produced * period_ns;
+        const int64_t now = NowNs();
+        if (now < target)
+          std::this_thread::sleep_for(std::chrono::nanoseconds(target - now));
+      }
+    });
+    test_pacer->Start(3, 500);
+  } else {
+    EngineConfig ecfg;
+    ecfg.capture_device = cfg.mic_device;
+    ecfg.monitor_device = cfg.monitor_device;
+    ecfg.monitor_enabled = cfg.sidetone;
+    ecfg.input_gain_db = cfg.gain_db;
+    engine = std::make_unique<AudioEngine>(ecfg, &channel);
+    if (!engine->Start(&err)) {
+      std::printf("ERROR: %s\n", err.c_str());
+      zoom.Leave();
+      zoom.Cleanup();
+      return 1;
+    }
+    std::printf("[audio] mic: %s\n", engine->capture_device_name().c_str());
+    if (cfg.sidetone) {
+      std::printf("[audio] sidetone: %s\n", engine->monitor_device_name().c_str());
+    }
   }
   std::printf("\nHold SPACE to talk. L latch, M sidetone, +/- gain, Q quit.\n\n");
 
@@ -300,22 +375,47 @@ int Run(int argc, char** argv) {
   // One thread does everything except audio: pumps the SDK, reads keys, heals
   // channel membership, redraws status. The audio path never waits on it.
   std::set<unsigned int> invited;
-  bool latched = false;
+  bool latched = cfg.start_latched;
   bool quit = false;
   double gain_db = cfg.gain_db;
+  const int64_t end_ns =
+      cfg.run_seconds > 0
+          ? NowNs() + static_cast<int64_t>(cfg.run_seconds) * 1'000'000'000LL
+          : 0;
 
   while (!quit && zoom.in_meeting()) {
+    if (end_ns != 0 && NowNs() >= end_ns) break;
     zoom.Pump(30);
 
-    // Membership healing. Invite anyone not yet invited; Zoom drops leavers
-    // on its own, and a rejoin arrives as a brand-new user id (plan §5).
-    if (roster.ConsumeDirty()) {
+    // Host duties + membership healing, on a coarse cadence. Invite anyone
+    // not yet invited who supports talkback (the web client does not --
+    // inviting it fails with INVALID_PARAMETER); Zoom drops leavers on its
+    // own, and a rejoin arrives as a brand-new user id (plan §5). Retried on
+    // a timer rather than only on roster changes, so a transient failure
+    // heals instead of sticking.
+    static int64_t next_house_ns = 0;
+    roster.ConsumeDirty();
+    if (NowNs() >= next_house_ns) {
+      next_house_ns = NowNs() + 2'000'000'000LL;
+      zoom.AdmitAllWaiting();  // no-op unless we are host
+
       std::vector<unsigned int> fresh;
       for (const RosterMember& m : roster.others()) {
-        if (invited.insert(m.user_id).second) fresh.push_back(m.user_id);
+        if (invited.count(m.user_id) != 0) continue;
+        if (!m.supports_talkback) {
+          static std::set<unsigned int> warned;
+          if (warned.insert(m.user_id).second) {
+            std::printf("\n[zoom] %s cannot receive talkback (web client?) -- "
+                        "skipping\n",
+                        m.name.c_str());
+          }
+          continue;
+        }
+        fresh.push_back(m.user_id);
       }
       if (!fresh.empty()) {
         if (channel.InviteUsers(fresh, &err)) {
+          for (unsigned int uid : fresh) invited.insert(uid);
           std::printf("\n[zoom] invited %zu participant(s) to the channel\n",
                       fresh.size());
         } else {
@@ -328,7 +428,7 @@ int Run(int argc, char** argv) {
     // hold-to-talk works without keyup events, which the console cannot give
     // us. The envelope in the engine makes rapid toggling safe by design.
     const bool space_down = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
-    engine.SetTalk(latched || space_down);
+    if (engine) engine->SetTalk(latched || space_down);
 
     while (_kbhit()) {
       const int c = _getch();
@@ -340,35 +440,51 @@ int Run(int argc, char** argv) {
         case 'm': case 'M': {
           static bool st = cfg.sidetone;
           st = !st;
-          engine.SetSidetoneEnabled(st);
+          if (engine) engine->SetSidetoneEnabled(st);
           break;
         }
         case '+': case '=':
           gain_db += 1.0;
-          engine.SetInputGainDb(gain_db);
+          if (engine) engine->SetInputGainDb(gain_db);
           break;
         case '-': case '_':
           gain_db -= 1.0;
-          engine.SetInputGainDb(gain_db);
+          if (engine) engine->SetInputGainDb(gain_db);
           break;
         default: break;
       }
     }
 
-    const EngineStats s = engine.stats();
-    std::printf("\r  [%s] %-6s  ch:%d listener(s)  gain %+.0f dB  "
-                "underrun %llu   ",
-                MeterBar(s.capture_peak).c_str(),
-                (latched ? "LATCH" : (space_down ? "TALK" : "")),
-                channel.users_joined(), gain_db,
-                (unsigned long long)s.pacer.underruns);
+    if (engine) {
+      const EngineStats s = engine->stats();
+      std::printf("\r  [%s] %-6s  ch:%d listener(s)  gain %+.0f dB  "
+                  "underrun %llu   ",
+                  MeterBar(s.capture_peak).c_str(),
+                  (latched ? "LATCH" : (space_down ? "TALK" : "")),
+                  channel.users_joined(), gain_db,
+                  (unsigned long long)s.pacer.underruns);
+    } else if (test_pacer) {
+      const PacerStats p = test_pacer->stats();
+      std::printf("\r  [test-signal] ch:%d listener(s)  sends %llu  "
+                  "underrun %llu  fail %llu   ",
+                  channel.users_joined(), (unsigned long long)p.sends,
+                  (unsigned long long)p.underruns,
+                  (unsigned long long)channel.send_failures());
+    }
   }
 
   // --- Teardown -------------------------------------------------------------
   std::printf("\n[zoom] leaving...\n");
-  engine.SetTalk(false);
-  Sleep(100);  // let the release ramp finish before the engine stops
-  engine.Stop();
+  if (engine) {
+    engine->SetTalk(false);
+    Sleep(100);  // let the release ramp finish before the engine stops
+    engine->Stop();
+  }
+  if (test_pacer) test_pacer->Stop();
+  if (test_gen.joinable()) {
+    test_running.store(false);
+    test_gen.join();
+  }
   zoom.Leave();
   zoom.Cleanup();
   return 0;

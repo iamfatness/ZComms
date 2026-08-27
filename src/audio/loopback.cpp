@@ -67,28 +67,8 @@ bool FindPlaybackDevice(const std::string& match, ma_device_id* out_id,
 
 }  // namespace
 
-std::vector<AudioDeviceInfo> ListPlaybackDevices() {
-  std::vector<AudioDeviceInfo> out;
-  WithContext([&](ma_context& ctx) {
-    ma_device_info* playback = nullptr;
-    ma_uint32 count = 0;
-    if (ma_context_get_devices(&ctx, &playback, &count, nullptr, nullptr) !=
-        MA_SUCCESS) {
-      return;
-    }
-    for (ma_uint32 i = 0; i < count; ++i) {
-      AudioDeviceInfo info;
-      info.name = playback[i].name;
-      info.is_default = playback[i].isDefault != 0;
-      info.index = static_cast<int>(i);
-      out.push_back(info);
-    }
-  });
-  return out;
-}
-
 // ---------------------------------------------------------------------------
-// LoopbackCapture
+// LoopbackCapture  (device enumeration lives in devices.cpp)
 // ---------------------------------------------------------------------------
 
 struct LoopbackCapture::Impl {

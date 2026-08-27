@@ -56,6 +56,7 @@ void Roster::Refresh() {
     if (info != nullptr) {
       m.name = Narrow(info->GetUserName());
       m.is_host = info->IsHost();
+      m.supports_talkback = info->IsSupportTalkback();
     }
     if (m.name.empty()) m.name = "user " + std::to_string(uid);
     others_.push_back(std::move(m));

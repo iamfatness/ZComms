@@ -40,6 +40,28 @@ scripted PTT cycle produces clean gating in the recorded WAV with no clipping.
 press/release pattern so ramp behaviour is inspectable without a person
 holding a key.
 
+### zcomms — the talkback panel (Phase 1 slice), END-TO-END VERIFIED
+
+`zcomms.exe` (src/app) is the product's core loop, live-verified 2026-08-27
+in a **fully automated** run: joined the meeting, was made host, created the
+channel, **auto-admitted** the listener from the waiting room
+(`AdmitAllToMeeting`), auto-invited it, and the 700/1000 Hz test signal was
+detected at the listening client's render endpoint at ~10^7:1 dominance
+(`zcomms-tap`, Goertzel across every playback endpoint).
+
+Operational truths that run established, beyond Spike A's list:
+
+- **The Zoom web client cannot receive talkback** (`IUserInfo::
+  IsSupportTalkback()` = false; inviting it fails INVALID_PARAMETER). The
+  roster carries the flag and the app skips and says so. Panelists must be on
+  a native client.
+- **The web client's host menu has no "Make Co-Host"** — only "Make Host".
+  Host works fine for channel creation, and zcomms-as-host is the smoothest
+  operational shape: it admits its own listeners.
+- Verification without ears: `zcomms --latch --test-signal` transmits a
+  700/1000 Hz beep pattern through the same ring/pacer as live audio;
+  `zcomms-tap` finds it. This pair is the repeatable e2e test.
+
 ### Spike A — RESULT: the thesis survives
 
 Measured live 2026-08-26 against a real meeting, over the **talkback

@@ -31,6 +31,11 @@ struct RosterMember {
   unsigned int user_id = 0;
   std::string name;
   bool is_host = false;
+  // Per-user talkback capability (IUserInfo::IsSupportTalkback). Live-observed
+  // false for the Zoom web client: inviting an unsupported participant fails
+  // with SDKERR_INVALID_PARAMETER, so the app filters on this rather than
+  // burning an invite to learn it.
+  bool supports_talkback = false;
 };
 
 class Roster : public ZOOM_SDK_NAMESPACE::IMeetingParticipantsCtrlEvent {
