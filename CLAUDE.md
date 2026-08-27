@@ -6,21 +6,73 @@ same change as any substantive work — docs-updated is part of done.
 
 ## Where things stand
 
-**Phase 0. The only code here is the Spike A harness**
-(`spikes/a-tx-latency/`). Nothing in `docs/PLAN.md` beyond that is
-implemented, Phase 1 has not started, and two spikes still carry kill criteria
-that can invalidate the architecture.
+Two things exist: the **Spike A harness** (`spikes/a-tx-latency/`) and the
+**audio engine core** (`src/audio/`, plan §6.1–6.3). There is no app shell, no
+UI, no channels, no admin, no packaging, and Phase 1 has not started. Two
+spikes still carry kill criteria that can invalidate the architecture.
 
 Before writing code, read `docs/PLAN.md` end to end. It exists specifically to
 stop work starting in the wrong place.
 
-### Spike A — TX latency harness
+### The audio engine (`src/audio/`)
 
-Built and verified, **but the decisive number does not exist yet.** The
-harness runs; it has not yet completed a measurement against a live meeting.
-See `spikes/a-tx-latency/README.md` for the method and how to re-run.
+Built and verified on real hardware. The chain, and the order is load-bearing:
 
-Verified on this machine:
+```
+capture -> input gain -> limiter -> PTT envelope -> sidetone tap
+        -> 20 ms frames -> ring -> TX pacer -> FrameSink
+```
+
+- The limiter sits **before** the PTT envelope so gain reduction does not pump
+  against the ramp depending on whether PTT is held.
+- The sidetone tap is **after** the envelope, so it monitors what is actually
+  being sent. Silence while not transmitting is correct, not a bug.
+- `FrameSink` is the seam. `ZoomMicSource` is one implementation; `WavSink` is
+  the other, and it is what lets the whole engine be exercised with no meeting
+  and no SDK. Use it — the properties that matter here are properties of a
+  waveform.
+
+Verified: 22/22 unit tests; on a real GoXLR, 363 ticks / 363 sends /
+0 underruns / 0 ring drops, 20 ms grid held to 0.38 ms worst lateness, and a
+scripted PTT cycle produces clean gating in the recorded WAV with no clipping.
+
+`zcomms-engine --help` drives all of it. `--ptt-cycle <on,off>` scripts the
+press/release pattern so ramp behaviour is inspectable without a person
+holding a key.
+
+### Spike A — RESULT: the thesis survives
+
+Measured live 2026-08-26 against a real meeting, over the **talkback
+transport** (`IMeetingTalkbackController::SendAudioDataToChannel`, which the
+product now prefers — see below):
+
+- **median 165.0 ms, p95 193.6 ms** one-way, harness → channel → a plain
+  Zoom client's output. 55 samples, MAD 4.2 ms, jitter (p95−p50) 28.6 ms.
+- Both inside plan §9's ~250 ms kill criterion. Bracketed against the 33.2 ms
+  local bias: true Zoom-path median in (132, 165] ms.
+
+Established alongside the number, each live-verified:
+
+- **The product's TX path is talkback channels, not the virtual mic.** The
+  owner's goal is "talk to the panelists inside the client's meeting";
+  `IMeetingTalkbackController` (SDK ≥7.0) does channel routing *inside* one
+  meeting — which supersedes plan §1's premise that routing cannot exist
+  there. Max 16 channels, 10 listeners each, per-channel meeting ducking.
+- **Talkback works under PKCE public-app-key auth.** No JWT, no client
+  secret, no raw-data license. The virtual mic's send window never opened
+  under this auth (`HasRawdataLicense()` false); if the party-line/virtual-mic
+  case ever matters, expect it to need JWT auth.
+- **Channel creation needs co-host role** (`SDKERR_NO_PERMISSION`, 12, as a
+  guest; works seconds after promotion). No account entitlement beyond that —
+  `IsMeetingSupportTalkBack()` was true on an ordinary account.
+- **A plain Zoom client hears channel audio with no app installed.**
+- **The receiving client renders talkback to the default-communications
+  endpoint** (the GoXLR "Music" bus on this machine), *not* its configured
+  speaker device. Cost several runs; the harness's `--tap-all` mode (taps
+  every playback endpoint at once, each with its own correlator) exists
+  because of it and ends that class of failure permanently.
+
+Verified before the live run:
 
 - `spike_a_tests` — 22/22.
 - `--self-test` recovers known delays of 45/150/275/600 ms to within 0.1 ms
@@ -60,16 +112,17 @@ ZComms is a **standalone product with no dependencies on any other codebase**.
 It links the Zoom Meeting SDK directly and owns its whole stack: SDK
 integration, audio engine, UI, sign-in, packaging.
 
-In particular there is **no helper process and no IPC layer** in Phase 1. The
+In particular there is **no helper process and no IPC layer**. The
 two-process designs common in this space exist because the media consumer is a
 plugin inside somebody else's application; ZComms has no host, so it does not
 pay that cost. Do not introduce pipes, shared memory or a wire protocol on the
 assumption that this is how Zoom media apps are built — see plan §3.1.
 
-Multi-channel (Phase 2) does add one worker process per channel, but only
-because the SDK is a per-process singleton and a Zoom meeting is a channel.
-Those workers are audio-only and deliberately narrow: mono 48 kHz PCM, one
-stream each way, no video, no share, no recording.
+Multi-channel needs no workers either: talkback channels live inside one
+meeting, so **one SDK client carries all 16** (plan §3.2, post-Spike-A).
+Worker-per-meeting exists only as a deferred idea for an operator running two
+clients' meetings at once — and the SDK's machine-wide exclusivity may forbid
+even that (Spike C).
 
 ## Design constraints that are load-bearing
 

@@ -54,10 +54,10 @@ struct PacerStats {
 
 class TxPacer {
  public:
-  // Called at the moment a burst-carrying frame is handed to the sink, with
-  // the host time of the burst onset itself. This is the emission timestamp
-  // the whole measurement is referenced to.
-  using EmissionFn = std::function<void(int32_t burst_id, bool up, int64_t host_ns)>;
+  // Called when a marked frame is handed to the sink, with the host time of
+  // the marked instant. Optional -- live audio is unmarked and never calls it.
+  using EmissionFn =
+      std::function<void(int32_t mark_id, bool mark_flag, int64_t host_ns)>;
 
   TxPacer(FrameRing* ring, FrameSink* sink, EmissionFn on_emit);
   ~TxPacer();

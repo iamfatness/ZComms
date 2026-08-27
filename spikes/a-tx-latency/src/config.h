@@ -21,8 +21,20 @@ enum class Mode {
   kHelp,
 };
 
+// Which Zoom path carries the probe audio.
+enum class Transport {
+  // IMeetingTalkbackController::SendAudioDataToChannel -- private channel to
+  // invited participants. The transport the product wants for "talk to the
+  // panelists", and the default.
+  kTalkback,
+  // The virtual mic (setExternalAudioSource) -- audio into the meeting's main
+  // mix, heard by everyone. Kept for the party-line case and for comparison.
+  kVirtualMic,
+};
+
 struct Config {
   Mode mode = Mode::kMeasure;
+  Transport transport = Transport::kTalkback;
 
   // Auth. Exactly one of these is used; public_app_key takes precedence
   // because it is what a General app issues, and JWT is the SDK-key path.
@@ -35,6 +47,16 @@ struct Config {
   std::string display_name = "ZComms Spike A";
 
   std::string loopback_device;  // substring match; empty = default output
+  // Tap EVERY playback endpoint at once, each with its own correlator, and
+  // report which one the probe arrives on. Exists because "which device does
+  // the far client actually render to" has now cost more runs than every
+  // other setup question combined -- including one where the operator heard
+  // the probe while the named endpoint captured digital silence.
+  bool tap_all = false;
+  // When set, everything the loopback tap hears is also written here as a
+  // WAV. The decisive diagnostic for a run that resolves nothing: the file
+  // shows whether the probe arrived clean, arrived mangled, or never arrived.
+  std::string dump_capture_path;
   int duration_s = 300;
   // Generous by default. A waiting room turns joining into a human action --
   // the host has to notice the request and click admit -- and timing out

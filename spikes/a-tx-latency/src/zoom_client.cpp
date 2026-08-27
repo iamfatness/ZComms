@@ -11,6 +11,8 @@
 // meeting_service_interface.h forward-declares IMeetingAudioController but does
 // not define it, so JoinVoip() needs the component header explicitly.
 #include "meeting_service_components/meeting_audio_interface.h"
+#include "meeting_service_components/meeting_participants_ctrl_interface.h"
+#include "meeting_service_components/meeting_talkback_ctrl_interface.h"
 #include "rawdata/zoom_rawdata_api.h"
 
 using namespace ZOOM_SDK_NAMESPACE;
@@ -251,9 +253,65 @@ bool ZoomClient::JoinVoip(std::string* error) {
     *error = "GetMeetingAudioController returned null";
     return false;
   }
+  // Register for audio events before joining, so the very first
+  // onUserAudioStatusChange is observed rather than missed.
+  audio->SetEvent(this);
   const SDKError err = audio->JoinVoip();
   if (err != SDKERR_SUCCESS) {
     *error = "JoinVoip failed: " + std::to_string(static_cast<int>(err));
+    return false;
+  }
+  return true;
+}
+
+bool ZoomClient::LeaveVoip(std::string* error) {
+  if (meeting_ == nullptr) {
+    *error = "no meeting service";
+    return false;
+  }
+  IMeetingAudioController* audio = meeting_->GetMeetingAudioController();
+  if (audio == nullptr) {
+    *error = "GetMeetingAudioController returned null";
+    return false;
+  }
+  const SDKError err = audio->LeaveVoip();
+  if (err != SDKERR_SUCCESS) {
+    *error = "LeaveVoip failed: " + std::to_string(static_cast<int>(err));
+    return false;
+  }
+  return true;
+}
+
+bool ZoomClient::UnmuteSelf(std::string* error) {
+  if (meeting_ == nullptr) {
+    *error = "no meeting service";
+    return false;
+  }
+  IMeetingParticipantsController* parts =
+      meeting_->GetMeetingParticipantsController();
+  if (parts == nullptr) {
+    *error = "GetMeetingParticipantsController returned null";
+    return false;
+  }
+  IUserInfo* self = parts->GetMySelfUser();
+  if (self == nullptr) {
+    *error = "GetMySelfUser returned null";
+    return false;
+  }
+  if (!self->IsAudioMuted()) return true;  // nothing to do
+
+  IMeetingAudioController* audio = meeting_->GetMeetingAudioController();
+  if (audio == nullptr) {
+    *error = "GetMeetingAudioController returned null";
+    return false;
+  }
+  const SDKError err = audio->UnMuteAudio(self->GetUserID());
+  if (err != SDKERR_SUCCESS) {
+    // A meeting configured "participants cannot unmute" lands here, and there
+    // is no fix on our side -- plan §2 calls this out. Name it rather than
+    // leaving a bare error code.
+    *error = "UnMuteAudio failed: " + std::to_string(static_cast<int>(err)) +
+             " (if the meeting forbids self-unmute, the host must allow it)";
     return false;
   }
   return true;
@@ -350,5 +408,77 @@ void ZoomClient::onUserNetworkStatusChanged(MeetingComponentType,
                                             ConnectionQuality, unsigned int,
                                             bool) {}
 void ZoomClient::onAppSignalPanelUpdated(IMeetingAppSignalHandler*) {}
+
+IMeetingTalkbackController* ZoomClient::GetTalkbackController() {
+  return meeting_ != nullptr ? meeting_->GetMeetingTalkbackController() : nullptr;
+}
+
+std::vector<unsigned int> ZoomClient::GetOtherParticipants() {
+  std::vector<unsigned int> out;
+  if (meeting_ == nullptr) return out;
+  IMeetingParticipantsController* parts =
+      meeting_->GetMeetingParticipantsController();
+  if (parts == nullptr) return out;
+  IUserInfo* self = parts->GetMySelfUser();
+  const unsigned int self_id = self != nullptr ? self->GetUserID() : 0;
+  IList<unsigned int>* list = parts->GetParticipantsList();
+  if (list == nullptr) return out;
+  for (int i = 0; i < list->GetCount(); ++i) {
+    const unsigned int uid = list->GetItem(i);
+    if (uid != self_id) out.push_back(uid);
+  }
+  return out;
+}
+
+// --- IMeetingAudioCtrlEvent -------------------------------------------------
+
+void ZoomClient::LogSelfAudioState(const char* tag) {
+  if (meeting_ == nullptr) return;
+  IMeetingParticipantsController* parts =
+      meeting_->GetMeetingParticipantsController();
+  IUserInfo* self = parts != nullptr ? parts->GetMySelfUser() : nullptr;
+  if (self == nullptr) {
+    std::printf("[audio] %s: self unavailable\n", tag);
+    return;
+  }
+  std::printf("[audio] %s: user %u, muted=%s\n", tag, self->GetUserID(),
+              self->IsAudioMuted() ? "YES" : "no");
+}
+
+void ZoomClient::onUserAudioStatusChange(IList<IUserAudioStatus*>* list,
+                                         const zchar_t*) {
+  if (list == nullptr) return;
+  static const char* kStatus[] = {"none",          "muted",
+                                  "unmuted",       "muted-by-host",
+                                  "unmuted-by-host", "muted-all",
+                                  "unmuted-all"};
+  static const char* kType[] = {"NONE", "VOIP", "PHONE", "UNKNOWN"};
+  for (int i = 0; i < list->GetCount(); ++i) {
+    IUserAudioStatus* s = list->GetItem(i);
+    if (s == nullptr) continue;
+    const int st = static_cast<int>(s->GetStatus());
+    const int ty = static_cast<int>(s->GetAudioType());
+    std::printf("[audio] user %u status=%s type=%s\n", s->GetUserId(),
+                (st >= 0 && st <= 6) ? kStatus[st] : "?",
+                (ty >= 0 && ty <= 3) ? kType[ty] : "?");
+  }
+}
+
+void ZoomClient::onUserActiveAudioChange(IList<unsigned int>*) {}
+
+void ZoomClient::onHostRequestStartAudio(IRequestStartAudioHandler* handler) {
+  // The host clicking "ask to unmute" arrives here as a consent request, not
+  // as an unmute. The first live run sat muted for five minutes while the
+  // operator repeatedly unmuted it in the participant list, because nothing
+  // accepted -- so a headless harness accepts by policy and says so.
+  std::printf("[audio] host asked to start audio -- accepting\n");
+  if (handler != nullptr) handler->Accept();
+}
+
+void ZoomClient::onJoin3rdPartyTelephonyAudio(const zchar_t*) {}
+
+void ZoomClient::onMuteOnEntryStatusChange(bool enabled) {
+  std::printf("[audio] mute-on-entry is %s\n", enabled ? "ON" : "off");
+}
 
 }  // namespace zc

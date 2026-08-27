@@ -19,8 +19,10 @@
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "auth_service_interface.h"
+#include "meeting_service_components/meeting_audio_interface.h"
 #include "meeting_service_interface.h"
 #include "mic_source.h"
 #include "zoom_sdk.h"
@@ -28,7 +30,8 @@
 namespace zc {
 
 class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
-                   public ZOOM_SDK_NAMESPACE::IMeetingServiceEvent {
+                   public ZOOM_SDK_NAMESPACE::IMeetingServiceEvent,
+                   public ZOOM_SDK_NAMESPACE::IMeetingAudioCtrlEvent {
  public:
   ~ZoomClient();
 
@@ -47,6 +50,25 @@ class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
   bool InstallVirtualMic(ZoomMicSource* source, std::string* error);
 
   bool JoinVoip(std::string* error);
+  bool LeaveVoip(std::string* error);
+
+  // Unmutes this client in the meeting. A meeting with mute-on-entry admits
+  // the harness muted, and a muted client's virtual mic never receives
+  // onMicStartSend -- the send window simply stays shut. Host-side unmute of
+  // an SDK client can require a consent handshake this harness does not
+  // implement, so it unmutes itself.
+  bool UnmuteSelf(std::string* error);
+
+  // Logs this client's audio connection and mute state, so "the send window
+  // never opened" comes with the reason attached instead of being a mystery.
+  void LogSelfAudioState(const char* tag);
+
+  // The talkback controller for this meeting, or null.
+  ZOOM_SDK_NAMESPACE::IMeetingTalkbackController* GetTalkbackController();
+
+  // Every participant except this client -- the people a talkback channel
+  // would be addressed to.
+  std::vector<unsigned int> GetOtherParticipants();
 
   void Leave();
   void Cleanup();
@@ -88,6 +110,17 @@ class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
                                   unsigned int user_id, bool uplink) override;
   void onAppSignalPanelUpdated(
       ZOOM_SDK_NAMESPACE::IMeetingAppSignalHandler* handler) override;
+
+  // IMeetingAudioCtrlEvent
+  void onUserAudioStatusChange(
+      ZOOM_SDK_NAMESPACE::IList<ZOOM_SDK_NAMESPACE::IUserAudioStatus*>* list,
+      const zchar_t* json) override;
+  void onUserActiveAudioChange(
+      ZOOM_SDK_NAMESPACE::IList<unsigned int>* list) override;
+  void onHostRequestStartAudio(
+      ZOOM_SDK_NAMESPACE::IRequestStartAudioHandler* handler) override;
+  void onJoin3rdPartyTelephonyAudio(const zchar_t* audio_info) override;
+  void onMuteOnEntryStatusChange(bool enabled) override;
 
  private:
   ZOOM_SDK_NAMESPACE::IAuthService* auth_ = nullptr;

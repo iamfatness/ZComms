@@ -132,6 +132,10 @@ void LatencyProbe::Resolve() {
     const Detection det = FindBurst(slice, needle, cfg_.detector);
     if (!det.found) {
       ++stats_.no_detection;
+      if (det.peak > stats_.best_failed_peak) {
+        stats_.best_failed_peak = det.peak;
+        stats_.best_failed_psr = det.psr;
+      }
       continue;
     }
 

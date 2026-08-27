@@ -75,6 +75,9 @@ USAGE
 
 OPTIONS
   --meeting <url|id>      Meeting to join. Accepts a join URL or a raw id.
+  --transport <t>         'talkback' (default): a private talkback channel to
+                          the other participants -- the product's own path.
+                          'mic': the virtual mic into the main meeting mix.
   --passcode <pw>         Meeting passcode (parsed from the URL if present).
   --duration <seconds>    Measurement length. Default 300.
   --join-timeout <secs>   How long to wait to get into the meeting. Default
@@ -82,6 +85,11 @@ OPTIONS
   --loopback-device <s>   Substring of the output device the second Zoom
                           client is playing to. Default: system default.
   --csv <path>            Write per-burst samples for offline inspection.
+  --dump-capture <path>   Also record the tapped audio to a WAV -- the
+                          diagnostic for a run that resolves nothing.
+  --tap-all               Tap every playback endpoint simultaneously and
+                          report which one the probe arrives on. Ends the
+                          which-device-does-Zoom-play-to guessing game.
   --config <path>         Local credential file. Default: local.env beside
                           the executable, then ./local.env.
   --verbose               Per-burst output as it resolves.
@@ -130,6 +138,17 @@ bool ParseConfig(int argc, char** argv, Config* out, std::string* error) {
       out->mode = Mode::kListDevices;
     } else if (a == "--check-auth") {
       out->mode = Mode::kCheckAuth;
+    } else if (a == "--transport") {
+      if (!need("--transport")) return false;
+      const std::string v = argv[++i];
+      if (v == "talkback") {
+        out->transport = Transport::kTalkback;
+      } else if (v == "mic") {
+        out->transport = Transport::kVirtualMic;
+      } else {
+        *error = "--transport wants 'talkback' or 'mic', got: " + v;
+        return false;
+      }
     } else if (a == "--verbose") {
       out->verbose = true;
     } else if (a == "--meeting") {
@@ -150,6 +169,11 @@ bool ParseConfig(int argc, char** argv, Config* out, std::string* error) {
     } else if (a == "--csv") {
       if (!need("--csv")) return false;
       out->csv_path = argv[++i];
+    } else if (a == "--dump-capture") {
+      if (!need("--dump-capture")) return false;
+      out->dump_capture_path = argv[++i];
+    } else if (a == "--tap-all") {
+      out->tap_all = true;
     } else if (a == "--config") {
       if (!need("--config")) return false;
       out->config_path = argv[++i];

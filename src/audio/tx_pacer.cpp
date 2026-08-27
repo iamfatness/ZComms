@@ -111,15 +111,15 @@ void TxPacer::Run() {
       }
     }
 
-    if (ok && have_frame && frame.burst_id >= 0 && on_emit_) {
-      // The onset sits burst_offset samples into the frame, so the burst's own
-      // emission time is the frame's plus that offset. Frame-aligned bursts
+    if (ok && have_frame && frame.mark_id >= 0 && on_emit_) {
+      // The marked instant sits mark_offset samples into the frame, so its own
+      // emission time is the frame's plus that offset. Frame-aligned marks
       // make this zero today; carrying it anyway keeps the alignment an
       // implementation choice rather than a hidden assumption.
-      const int64_t onset_ns =
+      const int64_t mark_ns =
           emit_ns + static_cast<int64_t>(
-                        (static_cast<double>(frame.burst_offset) / kSampleRate) * 1e9);
-      on_emit_(frame.burst_id, frame.burst_up, onset_ns);
+                        (static_cast<double>(frame.mark_offset) / kSampleRate) * 1e9);
+      on_emit_(frame.mark_id, frame.mark_flag, mark_ns);
     }
   }
 }
