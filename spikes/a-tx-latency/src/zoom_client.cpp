@@ -1,0 +1,354 @@
+#include "zoom_client.h"
+
+#include <windows.h>
+
+#include <cstdio>
+#include <string>
+#include <vector>
+
+#include "clock.h"
+#include "jwt.h"
+// meeting_service_interface.h forward-declares IMeetingAudioController but does
+// not define it, so JoinVoip() needs the component header explicitly.
+#include "meeting_service_components/meeting_audio_interface.h"
+#include "rawdata/zoom_rawdata_api.h"
+
+using namespace ZOOM_SDK_NAMESPACE;
+
+namespace zc {
+namespace {
+
+std::wstring Widen(const std::string& s) {
+  if (s.empty()) return std::wstring();
+  const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
+                                    static_cast<int>(s.size()), nullptr, 0);
+  std::wstring out(static_cast<size_t>(n), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()),
+                      out.data(), n);
+  return out;
+}
+
+}  // namespace
+
+const char* MeetingStatusName(MeetingStatus s) {
+  switch (s) {
+    case MEETING_STATUS_IDLE: return "IDLE";
+    case MEETING_STATUS_CONNECTING: return "CONNECTING";
+    case MEETING_STATUS_WAITINGFORHOST: return "WAITING_FOR_HOST";
+    case MEETING_STATUS_INMEETING: return "IN_MEETING";
+    case MEETING_STATUS_DISCONNECTING: return "DISCONNECTING";
+    case MEETING_STATUS_RECONNECTING: return "RECONNECTING";
+    case MEETING_STATUS_FAILED: return "FAILED";
+    case MEETING_STATUS_ENDED: return "ENDED";
+    case MEETING_STATUS_LOCKED: return "LOCKED";
+    case MEETING_STATUS_UNLOCKED: return "UNLOCKED";
+    case MEETING_STATUS_IN_WAITING_ROOM: return "IN_WAITING_ROOM";
+    case MEETING_STATUS_WEBINAR_PROMOTE: return "WEBINAR_PROMOTE";
+    case MEETING_STATUS_WEBINAR_DEPROMOTE: return "WEBINAR_DEPROMOTE";
+    case MEETING_STATUS_JOIN_BREAKOUT_ROOM: return "JOIN_BREAKOUT_ROOM";
+    case MEETING_STATUS_LEAVE_BREAKOUT_ROOM: return "LEAVE_BREAKOUT_ROOM";
+    default: return "UNKNOWN";
+  }
+}
+
+const char* AuthResultName(AuthResult r) {
+  switch (r) {
+    case AUTHRET_SUCCESS: return "SUCCESS";
+    case AUTHRET_KEYORSECRETEMPTY: return "KEY_OR_SECRET_EMPTY";
+    case AUTHRET_KEYORSECRETWRONG: return "KEY_OR_SECRET_WRONG";
+    case AUTHRET_ACCOUNTNOTSUPPORT: return "ACCOUNT_NOT_SUPPORTED";
+    case AUTHRET_ACCOUNTNOTENABLESDK: return "ACCOUNT_NOT_ENABLED_FOR_SDK";
+    case AUTHRET_UNKNOWN: return "UNKNOWN";
+    case AUTHRET_SERVICE_BUSY: return "SERVICE_BUSY";
+    case AUTHRET_NONE: return "NONE";
+    case AUTHRET_OVERTIME: return "TIMEOUT";
+    case AUTHRET_NETWORKISSUE: return "NETWORK_ISSUE";
+    case AUTHRET_CLIENT_INCOMPATIBLE: return "CLIENT_INCOMPATIBLE";
+    case AUTHRET_JWTTOKENWRONG: return "JWT_TOKEN_WRONG";
+    case AUTHRET_LIMIT_EXCEEDED_EXCEPTION: return "RATE_LIMIT_EXCEEDED";
+    default: return "?";
+  }
+}
+
+std::string MeetingFailReason(int code) {
+  switch (code) {
+    case MEETING_FAIL_PASSWORD_ERR: return "wrong passcode";
+    case MEETING_FAIL_MEETING_NOT_START: return "meeting has not started";
+    case MEETING_FAIL_MEETING_NOT_EXIST: return "meeting does not exist";
+    case MEETING_FAIL_MEETING_OVER: return "meeting is over";
+    case MEETING_FAIL_MEETING_USER_FULL: return "meeting is full";
+    case MEETING_FAIL_CONNECTION_ERR: return "connection error";
+    case MEETING_FAIL_MMR_ERR: return "media server error";
+    case MEETING_FAIL_CONFLOCKED: return "meeting is locked";
+    case MEETING_FAIL_MEETING_RESTRICTED: return "meeting is restricted";
+    case MEETING_FAIL_ENFORCE_LOGIN:
+      return "meeting requires a signed-in user -- a guest SDK client cannot "
+             "join it";
+    case MEETING_FAIL_NEED_SIGN_IN_FOR_PRIVATE_MEETING:
+      return "private meeting, sign-in required";
+    case MEETING_FAIL_BLOCKED_BY_ACCOUNT_ADMIN:
+      return "blocked by account admin";
+    default: return "code " + std::to_string(code);
+  }
+}
+
+ZoomClient::~ZoomClient() { Cleanup(); }
+
+void ZoomClient::Pump(int ms) {
+  const int64_t deadline = NowNs() + static_cast<int64_t>(ms) * 1'000'000;
+  MSG msg;
+  do {
+    while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+      TranslateMessage(&msg);
+      DispatchMessage(&msg);
+    }
+    Sleep(1);
+  } while (NowNs() < deadline);
+}
+
+bool ZoomClient::Init(std::string* error) {
+  InitParam param;
+  param.strWebDomain = L"https://zoom.us";
+  param.strSupportUrl = L"https://zoom.us";
+  param.emLanguageID = LANGUAGE_English;
+  param.enableLogByDefault = true;
+  param.enableGenerateDump = true;
+  // Heap rather than the stack default. Audio raw data buffers handed to a
+  // callback that outlives the callback frame are a use-after-free waiting to
+  // happen; the harness does not subscribe to RX today, but the setting is
+  // free and the failure it prevents is not.
+  param.rawdataOpts.audioRawdataMemoryMode = ZoomSDKRawDataMemoryModeHeap;
+
+  const SDKError err = InitSDK(param);
+  if (err != SDKERR_SUCCESS) {
+    *error = "InitSDK failed: " + std::to_string(static_cast<int>(err));
+    return false;
+  }
+  sdk_initialised_ = true;
+  std::printf("[sdk] initialised, version %ls\n", GetSDKVersion());
+  return true;
+}
+
+bool ZoomClient::Authenticate(const std::string& public_app_key,
+                              const std::string& sdk_key,
+                              const std::string& sdk_secret, int timeout_ms,
+                              std::string* error) {
+  if (CreateAuthService(&auth_) != SDKERR_SUCCESS || auth_ == nullptr) {
+    *error = "CreateAuthService failed";
+    return false;
+  }
+  auth_->SetEvent(this);
+
+  AuthContext ctx;
+  std::wstring key_w, jwt_w;
+
+  if (!public_app_key.empty()) {
+    key_w = Widen(public_app_key);
+    ctx.publicAppKey = key_w.c_str();
+    std::printf("[sdk] authenticating with public app key (...%s)\n",
+                public_app_key.size() > 4
+                    ? public_app_key.substr(public_app_key.size() - 4).c_str()
+                    : "****");
+  } else {
+    std::string jwt_err;
+    const std::string jwt = MakeMeetingSdkJwt(sdk_key, sdk_secret, 3600, &jwt_err);
+    if (jwt.empty()) {
+      *error = "no credentials: " + jwt_err;
+      return false;
+    }
+    jwt_w = Widen(jwt);
+    ctx.jwt_token = jwt_w.c_str();
+    std::printf("[sdk] authenticating with a locally-minted JWT\n");
+  }
+
+  const SDKError err = auth_->SDKAuth(ctx);
+  if (err != SDKERR_SUCCESS) {
+    *error = "SDKAuth call failed: " + std::to_string(static_cast<int>(err));
+    return false;
+  }
+
+  const int64_t deadline = NowNs() + static_cast<int64_t>(timeout_ms) * 1'000'000;
+  while (!auth_returned_.load() && NowNs() < deadline) Pump(50);
+
+  if (!auth_returned_.load()) {
+    *error = "authentication timed out after " + std::to_string(timeout_ms) + " ms";
+    return false;
+  }
+  const AuthResult result = static_cast<AuthResult>(auth_result_.load());
+  if (result != AUTHRET_SUCCESS) {
+    *error = std::string("authentication failed: ") + AuthResultName(result);
+    return false;
+  }
+  return true;
+}
+
+bool ZoomClient::Join(uint64_t meeting_number, const std::string& password,
+                      const std::string& display_name, int timeout_ms,
+                      std::string* error) {
+  if (CreateMeetingService(&meeting_) != SDKERR_SUCCESS || meeting_ == nullptr) {
+    *error = "CreateMeetingService failed";
+    return false;
+  }
+  meeting_->SetEvent(this);
+
+  const std::wstring name_w = Widen(display_name);
+  const std::wstring pw_w = Widen(password);
+
+  JoinParam jp;
+  jp.userType = SDK_UT_WITHOUT_LOGIN;
+  JoinParam4WithoutLogin& p = jp.param.withoutloginuserJoin;
+  p.meetingNumber = meeting_number;
+  p.userName = name_w.c_str();
+  p.psw = pw_w.c_str();
+  p.isVideoOff = true;
+  // Audio explicitly ON: the whole point is a virtual mic on the meeting's
+  // audio, and joining with audio off would install a mic onto nothing.
+  p.isAudioOff = false;
+
+  const SDKError err = meeting_->Join(jp);
+  if (err != SDKERR_SUCCESS) {
+    *error = "Join call failed: " + std::to_string(static_cast<int>(err));
+    return false;
+  }
+
+  const int64_t deadline = NowNs() + static_cast<int64_t>(timeout_ms) * 1'000'000;
+  while (NowNs() < deadline) {
+    Pump(100);
+    const MeetingStatus s = status_.load();
+    if (s == MEETING_STATUS_INMEETING) return true;
+    if (s == MEETING_STATUS_FAILED) {
+      *error = "join failed: " + MeetingFailReason(last_fail_code_.load());
+      return false;
+    }
+    if (s == MEETING_STATUS_ENDED) {
+      *error = "meeting ended before the harness got in";
+      return false;
+    }
+  }
+
+  // A waiting room is not a bug and not a timeout -- it is a host action the
+  // operator has to take, and saying so is the difference between a 30-second
+  // fix and a debugging session.
+  const MeetingStatus s = status_.load();
+  if (s == MEETING_STATUS_IN_WAITING_ROOM) {
+    *error = "still in the waiting room -- the host must admit \"" +
+             display_name + "\"";
+  } else if (s == MEETING_STATUS_WAITINGFORHOST) {
+    *error = "waiting for the host to start the meeting";
+  } else {
+    *error = std::string("join timed out in state ") + MeetingStatusName(s);
+  }
+  return false;
+}
+
+bool ZoomClient::JoinVoip(std::string* error) {
+  if (meeting_ == nullptr) {
+    *error = "no meeting service";
+    return false;
+  }
+  IMeetingAudioController* audio = meeting_->GetMeetingAudioController();
+  if (audio == nullptr) {
+    *error = "GetMeetingAudioController returned null";
+    return false;
+  }
+  const SDKError err = audio->JoinVoip();
+  if (err != SDKERR_SUCCESS) {
+    *error = "JoinVoip failed: " + std::to_string(static_cast<int>(err));
+    return false;
+  }
+  return true;
+}
+
+bool ZoomClient::InstallVirtualMic(ZoomMicSource* source, std::string* error) {
+  if (!HasRawdataLicense()) {
+    // Worth checking explicitly. Without the raw-data entitlement the calls
+    // below can succeed and simply never fire a callback, which looks like a
+    // hang rather than like a licensing problem.
+    std::printf("[sdk] WARNING: HasRawdataLicense() is false -- the virtual "
+                "mic callbacks may never fire\n");
+  }
+  IZoomSDKAudioRawDataHelper* helper = GetAudioRawdataHelper();
+  if (helper == nullptr) {
+    *error = "GetAudioRawdataHelper returned null";
+    return false;
+  }
+  const SDKError err = helper->setExternalAudioSource(source);
+  if (err != SDKERR_SUCCESS) {
+    *error = "setExternalAudioSource failed: " + std::to_string(static_cast<int>(err));
+    return false;
+  }
+  return true;
+}
+
+void ZoomClient::Leave() {
+  if (meeting_ != nullptr && status_.load() == MEETING_STATUS_INMEETING) {
+    meeting_->Leave(LEAVE_MEETING);
+    for (int i = 0; i < 30 && status_.load() == MEETING_STATUS_INMEETING; ++i) {
+      Pump(100);
+    }
+  }
+}
+
+void ZoomClient::Cleanup() {
+  // Teardown order is deliberate: services first, SDK last. CleanUPSDK() is
+  // documented as unsafe from inside a callback, which is one more reason the
+  // pump is drained before getting here.
+  if (meeting_ != nullptr) {
+    DestroyMeetingService(meeting_);
+    meeting_ = nullptr;
+  }
+  if (auth_ != nullptr) {
+    DestroyAuthService(auth_);
+    auth_ = nullptr;
+  }
+  if (sdk_initialised_) {
+    CleanUPSDK();
+    sdk_initialised_ = false;
+  }
+}
+
+// --- IAuthServiceEvent ------------------------------------------------------
+
+void ZoomClient::onAuthenticationReturn(AuthResult ret) {
+  auth_result_.store(static_cast<int>(ret));
+  auth_returned_.store(true);
+  std::printf("[sdk] onAuthenticationReturn: %s\n", AuthResultName(ret));
+}
+
+void ZoomClient::onLoginReturnWithReason(LOGINSTATUS, IAccountInfo*,
+                                         LoginFailReason) {}
+void ZoomClient::onLogout() {}
+void ZoomClient::onZoomIdentityExpired() {
+  std::printf("[sdk] zoom identity expired\n");
+}
+void ZoomClient::onZoomAuthIdentityExpired() {
+  std::printf("[sdk] zoom auth identity expires soon\n");
+}
+void ZoomClient::onNotificationServiceStatus(SDKNotificationServiceStatus,
+                                             SDKNotificationServiceError) {}
+
+// --- IMeetingServiceEvent ---------------------------------------------------
+
+void ZoomClient::onMeetingStatusChanged(MeetingStatus status, int result) {
+  status_.store(status);
+  if (status == MEETING_STATUS_FAILED || status == MEETING_STATUS_ENDED) {
+    last_fail_code_.store(result);
+  }
+  std::printf("[sdk] meeting status: %s%s\n", MeetingStatusName(status),
+              (status == MEETING_STATUS_FAILED)
+                  ? (" (" + MeetingFailReason(result) + ")").c_str()
+                  : "");
+}
+
+void ZoomClient::onMeetingStatisticsWarningNotification(StatisticsWarningType) {}
+void ZoomClient::onMeetingParameterNotification(const MeetingParameter*) {}
+void ZoomClient::onSuspendParticipantsActivities() {}
+void ZoomClient::onAICompanionActiveChangeNotice(bool) {}
+void ZoomClient::onMeetingTopicChanged(const zchar_t*) {}
+void ZoomClient::onMeetingFullToWatchLiveStream(const zchar_t*) {}
+void ZoomClient::onUserNetworkStatusChanged(MeetingComponentType,
+                                            ConnectionQuality, unsigned int,
+                                            bool) {}
+void ZoomClient::onAppSignalPanelUpdated(IMeetingAppSignalHandler*) {}
+
+}  // namespace zc

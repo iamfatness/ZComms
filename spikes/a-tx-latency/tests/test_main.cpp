@@ -1,0 +1,24 @@
+#include <cstdio>
+
+#include "test_util.h"
+
+int main() {
+  std::printf("Spike A core tests\n\n");
+  TestCorrelator();
+  TestStats();
+  TestFrameRing();
+  TestTimebase();
+  TestPipeline();
+
+  const auto& failures = zctest::Failures();
+  std::printf("\n");
+  if (failures.empty()) {
+    std::printf("ALL TESTS PASSED\n");
+    return 0;
+  }
+  std::printf("%zu FAILURE(S):\n", failures.size());
+  for (const auto& f : failures) {
+    std::printf("  [%s] %s\n", f.test.c_str(), f.detail.c_str());
+  }
+  return 1;
+}

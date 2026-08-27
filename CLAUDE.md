@@ -6,13 +6,53 @@ same change as any substantive work — docs-updated is part of done.
 
 ## Where things stand
 
-**Nothing is built.** This repo holds one document, `docs/PLAN.md`, which is a
-pre-commit design memo. Do not treat anything in it as implemented. Phase 0
-(four spikes) has not run, and two of those spikes carry kill criteria that can
-still invalidate the architecture.
+**Phase 0. The only code here is the Spike A harness**
+(`spikes/a-tx-latency/`). Nothing in `docs/PLAN.md` beyond that is
+implemented, Phase 1 has not started, and two spikes still carry kill criteria
+that can invalidate the architecture.
 
 Before writing code, read `docs/PLAN.md` end to end. It exists specifically to
 stop work starting in the wrong place.
+
+### Spike A — TX latency harness
+
+Built and verified, **but the decisive number does not exist yet.** The
+harness runs; it has not yet completed a measurement against a live meeting.
+See `spikes/a-tx-latency/README.md` for the method and how to re-run.
+
+Verified on this machine:
+
+- `spike_a_tests` — 22/22.
+- `--self-test` recovers known delays of 45/150/275/600 ms to within 0.1 ms
+  through the full signal → correlation → timebase chain.
+- `--calibrate` — 13/13 bursts resolved, 0 underruns, 0 gated ticks, 20 ms grid
+  held to 0.01 ms mean lateness. Local render+loopback bias **33.2 ms**, which
+  is the lower bound of the bracket any Zoom figure gets reported against.
+- `--check-auth` — `AUTHRET_SUCCESS`.
+
+**Do not quote a latency number from anywhere until a live run produces one.**
+Run `--self-test` before believing any live figure; the live run has no ground
+truth by construction, so that is the only place the instrument gets checked.
+
+### Things that cost real time here, worth not rediscovering
+
+- **The SDK refuses to initialise if another process holds one.** `InitSDK`
+  returned `SDKERR_OTHER_SDK_INSTANCE_RUNNING` (14) purely because an
+  unrelated app's Zoom engine was running. Kill other SDK hosts first. This
+  also points at plan §3.2: the singleton may be wider than per-process, which
+  would change Phase 2's worker model. **Spike C should test it directly.**
+- **`sdk.dll` crashes the process on exit.** Returning from `main` reaches its
+  `DLL_PROCESS_DETACH`, which throws under the loader lock and fastfails
+  (`0xC0000409`). It fires even if `InitSDK` was never called. See `HardExit()`
+  in `spikes/a-tx-latency/src/main.cpp`.
+- **Zoom SDK headers require `windows.h` first** — they use `HWND`/`RECT`/
+  `UINT64` bare.
+- **`setvbuf(_IOLBF)` is a no-op on Win32.** Use `_IONBF`, or a long run's
+  progress output stays invisible until it exits.
+- **A waiting room blocks a guest SDK client indefinitely.** The harness joins
+  as `SDK_UT_WITHOUT_LOGIN` and lands in the waiting room; someone has to
+  click admit. Turn the waiting room off before an unattended run, and watch
+  the 40-minute limit on basic accounts — it ends the meeting underneath you.
 
 ## What this project is not
 
