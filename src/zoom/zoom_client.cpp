@@ -413,6 +413,11 @@ IMeetingTalkbackController* ZoomClient::GetTalkbackController() {
   return meeting_ != nullptr ? meeting_->GetMeetingTalkbackController() : nullptr;
 }
 
+IMeetingParticipantsController* ZoomClient::GetParticipantsController() {
+  return meeting_ != nullptr ? meeting_->GetMeetingParticipantsController()
+                             : nullptr;
+}
+
 std::vector<unsigned int> ZoomClient::GetOtherParticipants() {
   std::vector<unsigned int> out;
   if (meeting_ == nullptr) return out;

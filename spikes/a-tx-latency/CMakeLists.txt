@@ -47,13 +47,12 @@ add_test(NAME spike_a_tests COMMAND spike_a_tests)
 # a normal state for a fresh clone, not a failure.
 # ---------------------------------------------------------------------------
 if(ZCOMMS_HAVE_SDK)
+  # zoom_client, talkback_source and jwt were promoted to src/zoom (the
+  # product's zcomms_zoom library); the spike consumes them from there.
   add_executable(zcomms_spike_a
     src/main.cpp
     src/loopback.cpp
-    src/zoom_client.cpp
-    src/talkback_source.cpp
     src/config.cpp
-    src/jwt.cpp
   )
   target_link_libraries(zcomms_spike_a PRIVATE spike_a_core zcomms_zoom winmm bcrypt)
   if(MSVC)
