@@ -112,16 +112,17 @@ ZComms is a **standalone product with no dependencies on any other codebase**.
 It links the Zoom Meeting SDK directly and owns its whole stack: SDK
 integration, audio engine, UI, sign-in, packaging.
 
-In particular there is **no helper process and no IPC layer** in Phase 1. The
+In particular there is **no helper process and no IPC layer**. The
 two-process designs common in this space exist because the media consumer is a
 plugin inside somebody else's application; ZComms has no host, so it does not
 pay that cost. Do not introduce pipes, shared memory or a wire protocol on the
 assumption that this is how Zoom media apps are built — see plan §3.1.
 
-Multi-channel (Phase 2) does add one worker process per channel, but only
-because the SDK is a per-process singleton and a Zoom meeting is a channel.
-Those workers are audio-only and deliberately narrow: mono 48 kHz PCM, one
-stream each way, no video, no share, no recording.
+Multi-channel needs no workers either: talkback channels live inside one
+meeting, so **one SDK client carries all 16** (plan §3.2, post-Spike-A).
+Worker-per-meeting exists only as a deferred idea for an operator running two
+clients' meetings at once — and the SDK's machine-wide exclusivity may forbid
+even that (Spike C).
 
 ## Design constraints that are load-bearing
 

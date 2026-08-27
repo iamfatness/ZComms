@@ -1,79 +1,110 @@
 # ZComms — standalone intercom on the Zoom Meeting SDK
 
-Status: **design, pre-commit.** Nothing here is built yet. Written 2026-08-25
-ZComms is a **standalone product**: its own repo, its own
-Zoom Marketplace identity, its own codebase, no dependency on any other
-product. The purpose of this document is to decide *whether* and *in what
-order* to build it, and to name the four spikes that make that decision
-cheaply.
+Status: **design, post-Spike-A.** Written 2026-08-25; reworked 2026-08-26
+after Spike A ran against a live meeting and its result reshaped the
+architecture (§9 carries the numbers). ZComms is a **standalone product**: its
+own repo, its own Zoom Marketplace identity, its own codebase, no dependency
+on any other product. The purpose of this document is to decide *what* to
+build and *in what order*, and to track the spikes that de-risk it.
+
+The one-sentence version of the rework: **Zoom now has channel routing inside
+a single meeting** — the talkback controller — and it was measured working at
+165 ms median. That kills this document's original central premise, and most
+of what follows is simpler than it was.
 
 ## 1. The strategic read
 
-A Zoom-transport intercom that competes with Unity Intercom head-on is a bad
-bet. A **native intercom fabric with a first-class Zoom leg** is a good one,
-and it is the only version of this product that Unity structurally cannot copy
-without rebuilding a Zoom media stack from scratch.
+A Zoom-transport intercom that competes with Unity Intercom head-on is still
+a bad bet — 165 ms is not "feels like a wire", and §9's numbers say Zoom's
+floor is Zoom's, not ours to lower. But the shape of what *is* buildable
+changed underneath this document, and changed in our favour.
 
-The reason is in Zoom's model, not in our code:
+The original premise here was that channel routing — the entire point of an
+intercom — does not exist inside a Zoom meeting: one virtual mic, one meeting,
+everyone hears the same mix, and the only pure-Zoom fix was a separate crew
+meeting per channel, one engine process per meeting. **That premise is dead.**
+Zoom's talkback controller (`IMeetingTalkbackController`, Meeting SDK ≥ 7.0,
+the API behind ZoomISO's talkback) provides private audio channels *inside a
+single meeting*: up to 16 of them, up to 10 listeners each, audio delivered
+over each listener's ordinary Zoom connection with the main meeting duckable
+underneath, inaudible to everyone else. "Talk to Camera but not Talent" is
+now one API call to a channel Camera is in and Talent is not.
 
-- **Zoom gives one SDK client exactly one microphone into exactly one
-  meeting.** `setExternalAudioSource()` installs a single virtual mic on a
-  single meeting connection. Everyone in that meeting hears the same mix.
-  Channel routing — the entire point of an intercom — does not exist inside a
-  Zoom meeting. "Talk to Camera but not Talent" cannot be expressed.
-- **Everything you say is heard by everyone in the meeting**, audience
-  included. That is the opposite of talkback. The only pure-Zoom fix is a
-  separate crew meeting, at which point the Zoom meeting *is* the channel.
-- **Latency is Zoom's, not ours.** Zoom's audio path runs a jitter buffer we
-  do not control. Unity's pitch is "it feels like a wire" at LAN latencies.
-  We cannot beat, tune, or bypass Zoom's transport.
+Spike A measured this path live (§9): **median 165 ms, p95 194 ms** one-way
+into a plain Zoom client, on an ordinary account, under public-app-key auth,
+with co-host role as the only gate. That is inside the ~250 ms bar for the
+product this now is:
 
-So the honest mapping is **one Zoom meeting == one channel**, implemented as
-one engine process per channel. That is a real product for Zoom-centric
-productions, and it ships fast because the engine already does 90% of it. It
-is not, on its own, a Unity competitor.
+**ZComms joins the client's own meeting as one co-host participant and becomes
+its talkback panel.** A director talks to all panelists, one panelist, or any
+named subset — from a Stream Deck, a control surface, or a key — without the
+audience hearing a word, and without the talent installing anything. Today
+that job is done with ZoomISO plus an operator who understands it, or not at
+all. The product is the checkbox version.
 
-The competitive wedge is the other direction: build the low-latency fabric for
-crew-to-crew, and use the existing headless engine to put a **remote Zoom guest
-on the party line natively** — RX through the raw-data path we already ship, TX
-through the SDK's virtual mic. Today, getting a remote Zoom guest onto a Unity
-party line means virtual audio cables, a spare machine, and a person who
-understands mix-minus. We can make it a checkbox, for the customers we already
-have.
+What survives from the original read:
+
+- **Latency is Zoom's, not ours.** 165 ms is IFB-class, not wire-class. Cue a
+  guest, brief a panel, yes; a camera operator tracking a fast director wants
+  better. The native fabric (Phase 3) remains the answer for wire-class
+  crew-to-crew, with the Zoom leg as one endpoint on it — and it remains the
+  thing an incumbent cannot copy without rebuilding a Zoom stack.
+- **The virtual mic still matters, demoted.** `setExternalAudioSource()` is
+  the party-line-to-everyone case — audio into the meeting's main mix. It is
+  no longer the product's core TX path, and §2 records the auth wall in front
+  of it.
+- **The wedge stays the same customers.** Productions already running remote
+  guests over Zoom, for whom the alternative is virtual audio cables, a spare
+  machine, and a person who understands mix-minus.
 
 ## 2. What the SDK actually gives us
 
-Confirmed present in the vendored SDK (`third_party/zoom-sdk/h/`):
+Confirmed in the vendored SDK (`third_party/zoom-sdk/h/`, 7.1.5), and — where
+marked — **live-verified by Spike A** rather than read off a header:
 
-| Direction | API | Notes |
+| Path | API | Status |
 | --- | --- | --- |
-| RX per-participant | `IZoomSDKAudioRawDataDelegate::onOneWayAudioRawDataReceived` | Already shipping. `EngineAudio`, `ZoomAudioRouter`. |
-| RX mixed | `onMixedAudioRawDataReceived` | Already shipping. Program feed for IFB. |
-| **TX** | `IZoomSDKAudioRawDataHelper::setExternalAudioSource(IZoomSDKVirtualAudioMicEvent*)` | **Never called by this codebase.** The whole talkback feature hangs off it. |
-| TX write | `IZoomSDKAudioRawDataSender::send(char*, len, sample_rate, channel)` | 16-bit PCM. Mono or stereo. 48 kHz supported. |
+| **TX per-channel** | `IMeetingTalkbackController::SendAudioDataToChannel(channelID, pcm, len, rate, ch)` | **Live-verified.** 16-bit PCM, 48 kHz mono, paced at 20 ms. The product's core TX path. |
+| Channel lifecycle | `CreateChannel(count)` / batch invite / batch remove / `SetChannelBackgroundVolume` | Live-verified. Max **16 channels**, max **10 listeners per channel**, all mutations asynchronous with per-item response callbacks. |
+| Gates | `IsMeetingSupportTalkBack()`, co-host role | Live-verified: supported on an ordinary account; a guest gets `SDKERR_NO_PERMISSION` (12) and creation works seconds after co-host promotion. No entitlement beyond role was needed. |
+| TX to everyone | `IZoomSDKAudioRawDataHelper::setExternalAudioSource(...)` | Header-verified only. **Its send window never opened under public-app-key auth** (`HasRawdataLicense()` false); expect it to require JWT auth. The party-line case, when it matters. |
+| RX per-participant | `IZoomSDKAudioRawDataDelegate::onOneWayAudioRawDataReceived` | Header-verified. Expect recording-privilege friction. |
+| RX mixed | `onMixedAudioRawDataReceived` | Header-verified. Program feed for IFB. |
 
-`IZoomSDKVirtualAudioMicEvent` is a four-callback lifecycle:
-`onMicInitialize(pSender)` hands us the sender, `onMicStartSend()` /
-`onMicStopSend()` bracket the window in which `send()` is legal, and
-`onMicUninitialized()` revokes the pointer. We own the cadence — the SDK does
-not pull from us.
+Talkback delivery facts that shape the product, all observed live:
+
+- **A plain Zoom client hears channel audio with nothing installed.** The
+  product premise. The listener is invited by user id; their join is confirmed
+  by callback; no acceptance step was observed on the receiving client.
+- **`SetChannelBackgroundVolume` is real ducking**, delivered by Zoom: the
+  main meeting lowers under the channel voice for channel members only.
+- **The receiving client renders talkback to the default-communications
+  endpoint**, not necessarily its configured speaker device. Harmless on
+  ordinary machines (they are the same device); on multi-bus interfaces it
+  puts talkback somewhere unexpected. A support-doc item, and the reason the
+  spike harness grew a tap-every-endpoint mode.
+- **The stream is voice-activity treated.** Send succeeds regardless, but
+  near-silence is not delivered continuously; do not design anything that
+  depends on a sub-audible keepalive reaching the far end.
 
 What the SDK does **not** give us, and which each cost real work:
 
-- **No echo cancellation on externally-supplied audio.** Feeding raw PCM to the
-  virtual mic bypasses Zoom's AEC entirely. An operator on speakers will echo
-  into the meeting for everyone. Either mandate headsets in the product (and
-  detect/warn when the output device is not a headset), or carry an AEC
-  (WebRTC APM or speexdsp) in the app. This is ship-blocking, not a polish item.
-- **No private audio to one participant.** No IFB to a single guest inside a
-  shared meeting.
-- **No control over Zoom's mute policy.** A host who mutes all, or a meeting
-  configured "participants cannot unmute", silences the talkback client with no
-  fix on our side. Must be detected and surfaced, not silently swallowed.
-- **No UI.** The SDK's raw-data mode launching silently is a *feature* here —
-  we draw our own app — but it means every failure state is ours to surface.
-  The plugin already learned this expensively: `join-watchdog.h`,
-  `zoom-join-decision.h`, `awaiting_admission`. Reuse them; do not re-derive.
+- **No echo cancellation on externally-supplied audio.** Raw PCM into either
+  TX path bypasses Zoom's AEC. An operator on speakers echoes their monitor
+  back into the channel. Mandate headsets with device detection, or carry an
+  AEC (WebRTC APM or speexdsp). Ship-blocking, not polish.
+- **Channel limits are product limits.** 16 channels; **10 listeners per
+  channel** — a party line for a 25-person crew cannot be one talkback
+  channel. The matrix (§7) must treat channel capacity as a first-class
+  constraint, and the all-hands case belongs to the virtual mic or the native
+  fabric.
+- **Mute policy quirks remain, in a new costume.** A host's "ask to unmute"
+  reaches an SDK client as a consent request (`onHostRequestStartAudio`) that
+  something must `Accept()` — silently ignoring it looks exactly like a dead
+  mic. Live-verified the expensive way.
+- **No UI.** Every failure state is ours to surface. The waiting room, the
+  co-host prompt, the meeting ending underneath us — Spike A hit each one, and
+  each needs a loud, named surface in the product.
 
 ## 3. Standalone from the ground up
 
@@ -96,28 +127,28 @@ and its whole failure surface simply do not exist here, and every millisecond
 that layer costs is not spent. In a product whose thesis is latency, that is
 not a tidiness argument.
 
-### 3.2 One SDK client per meeting is still a process boundary
+### 3.2 One SDK client now carries every channel
 
-The simplification is not total. The Meeting SDK is a **process-level
-singleton**: one initialised SDK, one authenticated client, one meeting. Since
-a Zoom meeting is a channel (§1), multi-channel means multiple SDK clients,
-which means multiple processes no matter how the app is written.
+The talkback pivot deletes the multi-process problem for the core product.
+Channels live *inside* one meeting, so **one SDK client — one process — serves
+all 16 of them.** The worker-per-channel model this section previously
+described existed only because a channel used to require its own meeting; it
+no longer describes Phase 1 or Phase 2.
 
-So the shape is:
+The Meeting SDK is still a process-level singleton (live-observed: `InitSDK`
+returns `SDKERR_OTHER_SDK_INSTANCE_RUNNING` while *any other application's*
+SDK engine is running — a stronger claim than per-process, and one with a
+product consequence: ZComms and other SDK apps, including CoreVideo, cannot
+run on the same machine simultaneously until proven otherwise). That matters
+now only for the cases that genuinely span meetings:
 
-- **Phase 1, one channel:** a single process. UI and SDK together, no IPC.
-- **Phase 2, N channels:** the UI process plus one small `zcomms-channel`
-  worker per channel.
+- an operator serving **two different clients' meetings at once**, and
+- the Phase 3 fabric bridging a Zoom leg per meeting.
 
-Those workers are ours and purpose-built: audio only, mono 48 kHz PCM, one
-stream in and one out. No video, no screen share, no recording. That is a far
-smaller bridge than a general-purpose media helper, and it should be designed
-as the narrow thing it is rather than as a general one.
-
-**Verify the singleton before building on it** — it is an assumption inherited
-from prior art, not something this project has measured. Spike C (§9) does
-that, and it also produces the per-channel RAM and CPU numbers that set the
-per-machine channel ceiling and therefore the pricing model.
+Both are worker-per-*meeting*, not worker-per-channel, and both are deferred
+until a customer actually asks. Spike C (§9) is re-scoped accordingly: its
+urgent question is no longer the per-channel cost model but the
+per-*machine* exclusivity of the SDK.
 
 ### 3.3 Naming is ours from day one
 
@@ -133,16 +164,21 @@ look like something else's binary.
 
 ### 3.4 What independence costs
 
-Being unrelated means building, not inheriting:
+Being unrelated means building, not inheriting — though two items on this
+list stopped being future work when the Spike A harness was deliberately
+built as the seed rather than as throwaway:
 
-- The full SDK integration: auth, join, meeting lifecycle, raw-audio subscribe
-  and the virtual-mic send path.
-- A sample-derived audio clock, drift handling, and gap accounting.
+- ~~The SDK integration~~ — auth, join, meeting lifecycle, the talkback
+  channel lifecycle and both TX paths exist and ran against a live meeting
+  (`spikes/a-tx-latency/`, promoted pieces in `src/audio`). Raw-audio RX
+  remains unbuilt.
+- ~~The audio engine~~ — capture, gain, look-ahead limiter, PTT ramps, the
+  paced TX thread and its clock: built, unit-tested, verified on hardware.
 - OAuth sign-in and token storage.
 - The app shell, the control surface, packaging, code signing, an updater.
 
-None of it is exotic and all of it is weeks. §8's Phase 1 sizing reflects that
-honestly rather than assuming a head start.
+What remains is weeks, not the original weeks-more. §8 reflects the new
+sizing.
 
 ### 3.5 The Zoom SDK is ZComms' to obtain
 
@@ -173,46 +209,39 @@ product's licensing shape.
 
 ## 4. Reference architecture
 
-Phase 1 — one channel, one process, no IPC:
+One process, one meeting, all channels — Phase 1 *and* Phase 2:
 
 ```
-┌──────────────────────────────────────────────┐
-│  ZComms (single process, one per operator)   │
-│  ┌────────────────────────────────────────┐  │
-│  │ UI · PTT/latch · faders · monitor mix  │  │
-│  ├────────────────────────────────────────┤  │
-│  │ audio engine · capture · AEC · limiter │  │
-│  ├────────────────────────────────────────┤  │
-│  │ Zoom Meeting SDK (linked in-process)   │  │
-│  │  RX one-way raw audio · TX virtual mic │  │
-│  └────────────────────────────────────────┘  │
-└───────────────────┬──────────────────────────┘
-                    │  one meeting = one channel
-              ┌─────▼──────┐
-              │  Meeting A │
-              └────────────┘
+┌──────────────────────────────────────────────────┐
+│  ZComms (single process, one per operator)       │
+│  ┌────────────────────────────────────────────┐  │
+│  │ UI · PTT/latch · matrix · monitor mix      │  │
+│  ├────────────────────────────────────────────┤  │
+│  │ audio engine · capture · AEC · limiter     │  │
+│  │ (built: src/audio, verified on hardware)   │  │
+│  ├────────────────────────────────────────────┤  │
+│  │ Zoom Meeting SDK (linked in-process)       │  │
+│  │  TX SendAudioDataToChannel per channel     │  │
+│  │  RX one-way / mixed raw audio              │  │
+│  └────────────────────────────────────────────┘  │
+└──────────────────────┬───────────────────────────┘
+                       │ joins as co-host
+              ┌────────▼─────────────────────────┐
+              │  The client's meeting            │
+              │  ch1: All Talent   (≤10 members) │
+              │  ch2: Camera                     │
+              │  ch3: Producers    … up to 16    │
+              └──────────────────────────────────┘
 ```
 
-Phase 2 — N channels, because the SDK is a per-process singleton:
+The channel *is* a talkback channel; the matrix (§7) is channel membership
+plus per-channel talk/listen state. No pipes, no workers, no second process
+anywhere in this picture.
 
-```
-┌───────────────────────────────┐   ┌──────────────────────┐
-│ ZComms UI                     │◄─►│ Admin backend        │
-│ mixer · matrix · presence     │   │ orgs · users · groups│
-└──┬─────────────┬──────────────┘   │ channels · matrix    │
-   │ audio-only bridge (mono 48k)   │ presence · audit log │
-┌──▼──────────┐ ┌▼─────────────┐    └──────────────────────┘
-│zcomms-      │ │zcomms-       │
-│channel #1   │ │channel #2    │  … one worker per channel
-│SDK · RX/TX  │ │SDK · RX/TX   │
-└──┬──────────┘ └┬─────────────┘
-┌──▼───────┐  ┌──▼───────┐
-│ Meeting A│  │ Meeting B│
-└──────────┘  └──────────┘
-```
-
-Phase 3 adds a native transport beside the Zoom leg; the mixer does not care
-which leg a channel arrives on.
+Worker-per-meeting returns only for multi-meeting operation (two clients'
+shows at once) and for Phase 3, where the native fabric carries crew-to-crew
+and a Zoom leg per meeting hangs off it; the mixer does not care which leg a
+channel arrives on.
 
 ## 5. Prior art worth not rediscovering
 
@@ -242,40 +271,80 @@ retrofit.
   understanding *why* before deciding you need events.
 - **Zoom user ids are meeting-scoped and recycled.** Store participants by a
   stable identity, never by user id: a control surface holding an id points at
-  nobody after a rejoin and at the wrong person once ids get reused.
+  nobody after a rejoin and at the wrong person once ids get reused. Doubly
+  load-bearing now: **talkback channel membership is keyed by user id**, so a
+  rejoin means re-inviting, and the matrix must heal membership on every
+  participant change rather than assume it.
+
+Spike A added its own entries to this list, each paid for live:
+
+- **Every talkback mutation is asynchronous with a response callback.** Treat
+  the callback as the truth and the call as a request. A design that assumes
+  `CreateChannel` returning success means a channel exists will race.
+- **A host's "ask to unmute" is a consent request, not an unmute.** Something
+  must implement `onHostRequestStartAudio` and `Accept()`, or the client sits
+  muted while the operator clicks unmute repeatedly and concludes the app is
+  broken.
+- **Never trust a configured audio device name; verify where audio actually
+  renders.** The far client played talkback to its default-communications
+  endpoint while its settings named a different device. Any feature that taps
+  or monitors an endpoint needs a verify-by-signal step, not a name match.
+- **The SDK's process exclusivity is machine-wide in practice.** Another
+  application's SDK engine blocks `InitSDK` outright (error 14). Detect it,
+  name the conflicting process, and say so — the raw error reads as a broken
+  install.
 
 ## 6. Components
 
-### 6.1 The virtual mic — `ZoomMicSource`
+### 6.1 The channel sender — `ZoomTalkbackSource`, with `ZoomMicSource` behind it
 
-A `IZoomSDKVirtualAudioMicEvent` implementation. It holds the
-`IZoomSDKAudioRawDataSender*` between `onMicInitialize` and
-`onMicUninitialized`, and a `can_send` flag between `onMicStartSend` and
-`onMicStopSend`. Nothing may call `send()` outside that window.
+Both TX paths already exist, built and live-exercised by the Spike A harness,
+behind one seam: `FrameSink`. The paced TX thread does not know which Zoom
+door the audio leaves through — or that it is Zoom at all (`WavSink` is the
+third implementation and is how the engine is verified without a meeting).
+
+**`ZoomTalkbackSource`** (the default): implements
+`IMeetingTalkbackCtrlEvent`, owns the channel lifecycle — create, batch
+invite, membership tracking from join/leave callbacks, background-volume
+ducking — and sends via `SendAudioDataToChannel`. Its send window opens only
+once the channel exists *and* has a confirmed listener; audio into an empty
+channel is counted, not pretended. The product generalises this from the
+spike's one channel to the matrix's N, with membership healed on every
+participant change (§5, recycled user ids).
+
+**`ZoomMicSource`** (the party-line case): the four-callback
+`IZoomSDKVirtualAudioMicEvent` lifecycle, sender pointer held between
+`onMicInitialize` and `onMicUninitialized`, every send gated on the
+start/stop window. Kept, but behind the auth caveat in §2.
 
 **A fixed-cadence TX thread, not an event-driven one.** A dedicated thread
-wakes every 20 ms, takes one frame from the capture queue and calls `send()`.
-This is deliberate on three counts:
+wakes every 20 ms on an absolute grid, takes one frame from the capture queue
+and sends. Deliberate on three counts:
 
-- Zoom wants a *steady* stream. A virtual mic that streams continuously and
-  goes quiet — rather than starting and stopping — is the behaviour the SDK
-  handles best.
+- Zoom wants a *steady* stream, on both TX paths.
 - A paced puller needs **no wakeup protocol at all**, which removes an entire
   class of consumed-wakeup bugs (§5) before it can exist.
 - Underrun becomes a normal, countable condition rather than a silence bug: no
-  frame ready at the tick, send silence, increment `mic_underrun`. Prime 2–3
-  frames (~40–60 ms) so ordinary jitter never underruns.
+  frame ready at the tick, send silence, increment the counter. Prime 2–3
+  frames so ordinary jitter never underruns.
 
-PTT press and release ramp in and out over a short fade rather than hard-gating
-— see §5 on why a hard edge is audible.
+Measured on this machine: 6007/6007 ticks sent, 0 underruns, grid held to
+0.02 ms mean lateness across a live meeting run.
+
+PTT press and release ramp in and out over a raised-cosine fade rather than
+hard-gating — see §5 on why a hard edge is audible. Built and unit-tested in
+`src/audio` (envelope, look-ahead limiter, smoothed gains, the pacer itself).
 
 ### 6.2 The capture queue
 
-A small bounded lock-free SPSC ring of 20 ms frames between the capture
-callback and the TX thread: 48 kHz, mono, 16-bit. Drop-oldest on overflow, and
-count the drops. In Phase 1 this is an in-process queue with no OS objects at
-all; in Phase 2 the same contract crosses to the channel worker, which is the
-only reason the boundary is worth naming now.
+A small bounded ring of 20 ms frames between the capture callback and the TX
+thread: 48 kHz, mono, 16-bit. Drop-oldest on overflow, and count the drops.
+Built (`src/audio/frame_ring`), with one recorded deviation from the original
+spec: mutex-guarded rather than lock-free, because drop-oldest makes the
+producer a writer of the read index and a correctly-boring mutex at 50
+pushes/second beat a subtly wrong lock-free ring inside the measurement path.
+An in-process queue with no OS objects; it crosses a process boundary only if
+multi-meeting workers (§3.2) ever exist.
 
 ### 6.3 Local audio I/O
 
@@ -301,12 +370,15 @@ than only pushing variables; and channels must be keyed by a stable id (§5).
 
 ### 6.5 Process model
 
-Phase 1 is one process and needs nothing here. Phase 2's channel workers do:
-each is launched by the UI, owns exactly one SDK client, and is tracked by the
-UI as its own child — the parent knows its workers' pids because it started
-them, so cleanup never needs to guess from a process list. Name every OS object
-under the `ZComms` prefix (§3.3), and never name a binary so that another
-product's cleanup could mistake it for one of its own.
+Phases 1 and 2 are one process and need nothing here (§3.2). If multi-meeting
+workers ever exist — one SDK client per *meeting*, for an operator running two
+shows — each is launched by the UI, owns exactly one SDK client, and is
+tracked by the UI as its own child: the parent knows its workers' pids
+because it started them, so cleanup never needs to guess from a process list.
+Name every OS object under the `ZComms` prefix (§3.3), and never name a
+binary so that another product's cleanup could mistake it for one of its own
+— note that the SDK's machine-wide exclusivity (§5) means such workers may
+not be able to coexist at all until Spike C says otherwise.
 
 ## 7. Admin portal and the group model
 
@@ -344,9 +416,14 @@ hears program until a producer talks, ducking program under the voice),
 **reply-to-last-talker**, and **call/flash** to get attention on a channel
 someone is listening to but not watching.
 
-Note the honest limit from §2: IFB to *one* guest inside a shared Zoom meeting
-is impossible. Per-guest IFB requires either a meeting per destination or the
-native fabric. Do not promise it on the Zoom-only phases.
+The honest limits from §2, updated: **per-guest IFB inside a shared meeting
+is now possible** — a talkback channel with one member is exactly that, and
+`SetChannelBackgroundVolume` is the program duck under the producer's voice,
+delivered by Zoom. The constraint that replaced impossibility is *capacity*:
+16 channels and 10 listeners per channel. The matrix resolver must pack
+groups into channels, refuse configurations that cannot fit, and route the
+all-hands case (more than 10 listeners) to the virtual mic or the native
+fabric rather than silently truncating a channel's membership.
 
 ### 7.3 Backend
 
@@ -357,77 +434,98 @@ resolved matrix and keeps working through a backend outage.
 
 ## 8. Phasing
 
-Rough sizing, deliberately coarse, and assuming a greenfield build — there is
-no head start to draw on (§3.4).
+Re-sized after Spike A. Two things moved the estimates down: the
+worker-per-channel process model is gone (§3.2), and the audio engine —
+capture, gain, limiter, PTT ramps, pacing, the TX seam — is already built and
+verified on hardware (`src/audio`), as is the SDK join/auth/talkback layer the
+spike harness proved out.
 
-**Phase 0 — Spikes (§9).** ~1 week. Decides everything below.
+**Phase 0 — Spikes (§9).** Spike A is done and passed. B is half-answered, C
+re-scoped, D unchanged. Remaining: days, not weeks.
 
-**Phase 1 — Single-channel talkback, Zoom transport.** ~8–12 weeks.
-One process, one meeting, PTT and latch, monitor mix, AEC, device selection,
-sign-in, packaging and signing. Ships as "producer talks to remote guests",
-which is genuinely useful on its own and is the smallest thing that proves the
-send path against a real meeting.
+**Phase 1 — The talkback panel.** ~6–9 weeks.
+One process, the client's meeting, up to 16 channels: PTT and latch per
+channel, channel setup from the participant list, monitor mix, AEC, device
+selection, sign-in, packaging and signing. Ships as "the director talks to
+any subset of panelists privately" — already a product no plain Zoom setup
+offers, and most of what remains is shell, not media: the engine and the SDK
+layer exist.
 
-**Phase 2 — Multi-channel + admin.** ~10–14 weeks.
-One worker per channel, the routing matrix, groups, presets, admin portal,
-presence, audit log, control surface. This is the first releasable *intercom*.
+**Phase 2 — Matrix + admin.** ~8–12 weeks.
+The routing matrix over channel membership, groups, presets pushed live,
+admin portal, presence, audit log, control surface / Companion module. First
+releasable *intercom*. (Multi-meeting workers appear here only if a customer
+needs two shows at once — otherwise not at all.)
 
 **Phase 3 — Native fabric.** ~12+ weeks.
-Own low-latency transport (Opus over a self-hosted SFU) for crew-to-crew, with
-the Zoom leg as one endpoint on it. This is where the Unity comparison becomes
-fair, and where per-guest IFB becomes possible.
+Own low-latency transport (Opus over a self-hosted SFU) for wire-class
+crew-to-crew — 165 ms is fine for IFB and cueing, not for a camera operator
+tracking a director — with the Zoom talkback leg as one endpoint on it. This
+is where the Unity comparison becomes fair.
 
 The go-to-market wedge stays what §1 argues: crews already running remote
 guests over Zoom, for whom a native Zoom leg is the thing no incumbent
 intercom offers.
 
-## 9. Spikes, with kill criteria
+## 9. Spikes — status after the live run of 2026-08-26
 
-Run these before committing engineering to Phase 1. Each is cheap; together
-they decide the architecture.
+**Spike A — TX latency. DONE, PASSED.**
+Measured over the talkback transport into a real meeting, observed at a plain
+Zoom client on the same machine, one clock end to end, emission timestamped
+at the actual send call, arrival recovered by matched-filter correlation with
+a least-squares capture timebase. The instrument was proven against known
+synthetic delays (45/150/275/600 ms recovered to within 0.1 ms) before any
+live figure was believed.
 
-**Spike A — TX round-trip latency. 1–2 days. The decisive one.**
-The smallest possible SDK harness: init, auth, join, `setExternalAudioSource`,
-push a 1 kHz tone, and measure the delay to a second Zoom client. Timestamp
-both ends against one clock — capture the far end's audio locally and correlate
-against the emission time, so the number is real end-to-end latency rather than
-a sum of guesses. This harness is also the seed of §6.1, so it is not throwaway
-work.
-*Kill criterion: if one-way latency exceeds ~250 ms, the Zoom-transport
-intercom thesis is dead for live crew use. Phase 1 still ships as
-producer-to-guest talkback, but Phase 3 moves to the front of the queue.*
+*Result: **median 165.0 ms, p95 193.6 ms** (55 samples, MAD 4.2 ms,
+p95−p50 jitter 28.6 ms). Local calibration bias 33.2 ms, so the true
+Zoom-path median brackets to (132, 165] ms. Both figures inside the ~250 ms
+kill criterion — the Zoom-transport thesis survives.* The harness lives at
+`spikes/a-tx-latency/` and re-runs in ~10 minutes; use `--tap-all`.
 
-**Spike B — Mute policy and identity. 1 day.**
-Can the SDK client unmute reliably? What happens under "mute all" and under
-"participants cannot unmute"? How does the talkback client appear in a normal
-client's participant list, and is that acceptable to put in front of a client's
-audience?
+Not measured: the virtual-mic path, whose send window never opened under
+public-app-key auth. No latency figure exists for it; do not quote one.
 
-**Spike C — The SDK's process model. 2 days.**
-Two questions Phase 2's whole shape rests on, neither of which this project has
-measured. First: is the Meeting SDK genuinely a per-process singleton, or can
-one process hold two authenticated clients in two meetings? An affirmative
-would collapse §3.2's worker model into a single process. Second, whichever
-answer: run two channels simultaneously and measure RAM and CPU per channel —
-that sets the per-machine channel ceiling and therefore the pricing model.
-*Kill criterion: if per-channel cost makes a realistic 6–8 channel operator
-station impractical on ordinary hardware, the per-channel-meeting architecture
-does not survive Phase 2 and the native fabric has to carry crew-to-crew.*
+**Spike B — Mute policy and identity. Half-answered in passing.**
+Answered: co-host role gates channel creation; a guest SDK client lands in
+the waiting room like anyone else; "ask to unmute" is a consent request the
+client must accept; the client appears in the participant list under its
+display name ("ZComms Spike A" did). Open: behaviour under "mute all" and
+"participants cannot unmute" *while a channel is live*, whether co-host
+demotion mid-show destroys channels, and whether the participant-list
+presentation is acceptable in front of a client's audience.
+
+**Spike C — SDK exclusivity. Re-scoped, 1 day.**
+The per-channel cost question is gone with the worker model. What remains is
+sharper and already half-observed: `InitSDK` fails with
+`SDKERR_OTHER_SDK_INSTANCE_RUNNING` while *another application's* SDK engine
+runs — machine-wide, not per-process. Confirm the boundary (two ZComms
+processes; ZComms beside another SDK app; whether `sdkPathPostfix` isolates
+data paths and changes the answer).
+*Kill criterion, updated: if the SDK is genuinely one-instance-per-machine
+with no isolation escape, ZComms cannot run alongside any other Meeting SDK
+product on an operator's machine — a compatibility fact that must be known
+before it is discovered by a customer.*
 
 **Spike D — Zoom ISV conversation. Calendar time, not engineering time.**
-An intercom multiplies concurrent Meeting SDK sessions per customer by the
-channel count. Get Zoom's position on that licensing shape **before** Phase 2,
-not after. It can invalidate the per-channel-meeting architecture outright.
+The shape changed: the core product is now **one SDK session per operator**,
+not per channel — a friendlier licensing story. The questions for Zoom:
+talkback API entitlement across account tiers (it worked on an ordinary
+account; is that stable policy?), the `ZComms` name (§3.7), and the
+multi-meeting case's session math for Phase 3.
 
 ## 10. Risks
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| Zoom latency unfixable | Cannot serve live crew intercom | Spike A first; Phase 3 native fabric |
-| Zoom licensing blocks N sessions | Phase 2 architecture invalid | Spike D before Phase 2 |
-| SDK is not a per-process singleton, or is worse than assumed | Phase 2 process model wrong | Spike C measures it before it is built on |
-| No AEC on the virtual mic | Echo into the client's meeting | Headset mandate + device detection, or bundle an AEC |
-| Greenfield scope underestimated | Phase 1 slips | §3.4 names what must be built; no head start assumed |
+| ~~Zoom latency unfixable~~ | *Retired: measured 165/194 ms, inside the bar* | Spike A result, 2026-08-26 |
+| **Talkback API entitlement is undocumented policy** | The core transport worked on one ordinary account; Zoom could gate it by tier or change it — it is the API behind a paid product (ZoomISO) | Spike D asks Zoom directly, before Phase 1 ships on it |
+| **Channel capacity (16 × 10)** | An all-hands page to >10 people cannot be one channel | Matrix packs and refuses honestly (§7.2); virtual mic / fabric for all-hands |
+| **Co-host dependency** | ZComms must be promoted in every client meeting; a host demotion mid-show may kill channels | Surface loudly; Spike B closes the demotion question; document the runbook |
+| SDK is one-instance-per-machine | ZComms cannot run beside other SDK apps (incl. CoreVideo) on one machine | Spike C confirms the boundary and the `sdkPathPostfix` escape |
+| Virtual-mic path needs JWT-auth | Party-line case blocked under PKCE | Accept the demotion; revisit auth only when that case is scheduled |
+| No AEC on raw TX | Operator's monitor echoes into the channel | Headset mandate + device detection, or bundle an AEC |
+| Endpoint rendering surprise | Talkback renders to the comms endpoint, not the named speaker | Support docs; verify-by-signal in device setup UX |
 | Marketplace review slips | Phase 1 built, cannot ship | Start the app identity before Phase 1 code |
 | `ZComms` name rejected at review | Rebrand after build | Raise the name in the Spike D conversation |
 | Unity's moat is trust, not features | Slow enterprise adoption | Lead with the Zoom leg; sell to crews already on Zoom |
