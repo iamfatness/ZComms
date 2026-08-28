@@ -33,7 +33,9 @@
 #include "devices.h"
 #include "engine.h"
 #include "frame_ring.h"
+#include "generator.h"
 #include "roster.h"
+#include "signal.h"
 #include "talkback_channels.h"
 #include "tx_pacer.h"
 #include "ui_html.h"
@@ -358,54 +360,21 @@ int Run(int argc, char** argv) {
   std::unique_ptr<AudioEngine> engine;
   std::unique_ptr<FrameRing> test_ring;
   std::unique_ptr<TxPacer> test_pacer;
-  std::atomic<bool> test_running{false};
-  std::thread test_gen;
 
+  std::unique_ptr<SignalGenerator> test_gen_src;
   if (cfg.test_signal) {
-    std::printf("[audio] TEST SIGNAL mode: 700/1000 Hz beep pattern\n");
+    // Spike A's probe: alternating up/down chirp bursts on a comfort-noise
+    // bed, every second. Chosen over tones because the far end of the e2e
+    // test detects by matched filter, and a chirp stays detectable through
+    // broadband audio (music, a live mic) that drowns a tone's energy ratio.
+    std::printf("[audio] TEST SIGNAL mode: chirp probe (matched-filter "
+                "detectable)\n");
     test_ring = std::make_unique<FrameRing>(50);
     test_pacer = std::make_unique<TxPacer>(test_ring.get(), &sink, nullptr);
-    test_running.store(true);
-    test_gen = std::thread([&test_ring, &test_running]() {
-      // 300 ms beep, 200 ms gap, alternating 700 and 1000 Hz, -12 dBFS, with
-      // 10 ms raised-cosine edges so the pattern is click-free like real PTT
-      // audio would be.
-      const double kAmp = 0.25;
-      const int beep = 48 * 300, gap = 48 * 200, ramp = 48 * 10;
-      uint64_t seq = 0;
-      int pos = 0;
-      bool high = false;
-      const int64_t period_ns = 20'000'000;
-      const int64_t start = NowNs();
-      int64_t produced = 0;
-      while (test_running.load()) {
-        TxFrame f;
-        f.seq = seq++;
-        for (int i = 0; i < kFrameSamples; ++i) {
-          double v = 0.0;
-          if (pos < beep) {
-            const double f_hz = high ? 1000.0 : 700.0;
-            double w = 1.0;
-            if (pos < ramp) w = 0.5 * (1.0 - std::cos(3.14159265 * pos / ramp));
-            else if (pos >= beep - ramp)
-              w = 0.5 * (1.0 - std::cos(3.14159265 * (beep - 1 - pos) / ramp));
-            v = kAmp * w *
-                std::sin(2.0 * 3.14159265 * f_hz * (pos / 48000.0));
-          }
-          f.pcm[i] = static_cast<int16_t>(v * 32767.0);
-          if (++pos >= beep + gap) {
-            pos = 0;
-            high = !high;
-          }
-        }
-        test_ring->Push(f);
-        ++produced;
-        const int64_t target = start + produced * period_ns;
-        const int64_t now = NowNs();
-        if (now < target)
-          std::this_thread::sleep_for(std::chrono::nanoseconds(target - now));
-      }
-    });
+    SignalParams sp;
+    sp.period_ms = 1000.0;  // denser than the spike: detection, not latency
+    test_gen_src = std::make_unique<SignalGenerator>(test_ring.get(), sp);
+    test_gen_src->Start();
     test_pacer->Start(3, 500);
   } else {
     EngineConfig ecfg;
@@ -752,10 +721,7 @@ int Run(int argc, char** argv) {
     engine->Stop();
   }
   if (test_pacer) test_pacer->Stop();
-  if (test_gen.joinable()) {
-    test_running.store(false);
-    test_gen.join();
-  }
+  if (test_gen_src) test_gen_src->Stop();
   zoom.Leave();
   zoom.Cleanup();
   return 0;

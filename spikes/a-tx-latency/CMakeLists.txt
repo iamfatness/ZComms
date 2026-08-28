@@ -13,12 +13,10 @@
 # lets the tests exercise the whole signal/correlation/timebase chain on a
 # machine with no meeting and no sound card.
 # ---------------------------------------------------------------------------
+# signal, correlator and generator promoted to src/audio (zcomms_audio).
 add_library(spike_a_core STATIC
-  src/signal.cpp
-  src/correlator.cpp
   src/stats.cpp
   src/timebase.cpp
-  src/generator.cpp
   src/probe.cpp
 )
 target_include_directories(spike_a_core PUBLIC src)

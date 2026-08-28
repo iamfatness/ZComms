@@ -27,6 +27,9 @@ set(MINIAUDIO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio")
 add_library(zcomms_audio STATIC
   src/audio/frame_ring.cpp
   src/audio/tx_pacer.cpp
+  src/audio/signal.cpp
+  src/audio/correlator.cpp
+  src/audio/generator.cpp
   src/audio/envelope.cpp
   src/audio/limiter.cpp
   src/audio/frame_accumulator.cpp
