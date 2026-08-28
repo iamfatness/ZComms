@@ -62,6 +62,33 @@ Operational truths that run established, beyond Spike A's list:
   700/1000 Hz beep pattern through the same ring/pacer as live audio;
   `zcomms-tap` finds it. This pair is the repeatable e2e test.
 
+### Multi-channel status and open defects (2026-08-28)
+
+Two channels ran live (created in one batch call, membership healing and
+panel routing chips working; a host-role handoff mid-bring-up was absorbed by
+the retry loop). **The two-channel privacy verification is NOT yet
+conclusive** — do not claim channel isolation is proven. Two blockers, both
+actionable:
+
+- **zcomms main-thread hang (AppHangB1), one occurrence.** ~40 s after a
+  phase that sent 8 s of audio into an **empty** channel, the main loop
+  stopped pumping and Windows killed the process. Not reproduced yet; suspect
+  the empty-channel `SendAudioDataToChannel` path (the CoreVideo talkback
+  work also hit SDK defects in this area). Instrument before trusting long
+  unattended runs.
+- **zcomms-tap's Goertzel gate fails in real environments.** Any broadband
+  audio on the tapped bus (a livestream; a client joined with "original
+  sound" streaming raw room noise) raises the off-band floor and defeats the
+  20× ratio. The fix is known and cheap: make `--test-signal` emit the Spike
+  A chirp bursts and give the tap the spike's matched-filter/PSR detector —
+  chirps decorrelate from music, and the up/down alternation is unambiguous.
+  Then the e2e needs no silence at all.
+
+Also observed: a dead web session can linger as a **ghost participant
+holding host** for ~1–2 min; it can even kick joiners. Wait it out — host
+auto-reassigns (twice it landed on zcomms itself, which the retry loop turns
+into a win).
+
 ### Spike A — RESULT: the thesis survives
 
 Measured live 2026-08-26 against a real meeting, over the **talkback
