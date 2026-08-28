@@ -11,6 +11,7 @@
 // ship-blocking for release; this build states the headset requirement
 // loudly instead), sign-in, packaging.
 #include <windows.h>
+#include <shellapi.h>
 #include <timeapi.h>
 #include <conio.h>
 
@@ -28,12 +29,14 @@
 
 #include "audio_defs.h"
 #include "clock.h"
+#include "control_server.h"
 #include "devices.h"
 #include "engine.h"
 #include "frame_ring.h"
 #include "roster.h"
 #include "talkback_source.h"
 #include "tx_pacer.h"
+#include "ui_html.h"
 #include "zoom_client.h"
 
 #pragma comment(lib, "winmm.lib")
@@ -67,7 +70,24 @@ struct AppConfig {
   // capture path itself is verified separately on hardware.
   bool test_signal = false;
   int run_seconds = 0;  // 0 = run until Q
+  // The browser panel / control API (plan §6.4). 0 disables.
+  uint16_t ui_port = 7350;
+  bool open_browser = false;
 };
+
+std::string JsonEscape(const std::string& s) {
+  std::string out;
+  for (char c : s) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      default:
+        if (static_cast<unsigned char>(c) >= 0x20) out.push_back(c);
+    }
+  }
+  return out;
+}
 
 std::string Trim(const std::string& s) {
   const auto b = s.find_first_not_of(" \t\r\n");
@@ -209,6 +229,9 @@ int Run(int argc, char** argv) {
     else if (a == "--latch") cfg.start_latched = true;
     else if (a == "--test-signal") cfg.test_signal = true;
     else if (a == "--seconds") cfg.run_seconds = std::atoi(next("--seconds"));
+    else if (a == "--no-ui") cfg.ui_port = 0;
+    else if (a == "--ui-port") cfg.ui_port = static_cast<uint16_t>(std::atoi(next("--ui-port")));
+    else if (a == "--open") cfg.open_browser = true;
     else {
       std::printf("ERROR: unknown argument %s\n\n", a.c_str());
       PrintUsage();
@@ -374,10 +397,57 @@ int Run(int argc, char** argv) {
   // --- Main loop ------------------------------------------------------------
   // One thread does everything except audio: pumps the SDK, reads keys, heals
   // channel membership, redraws status. The audio path never waits on it.
+  // --- Control surface (the browser panel; plan §6.4) -----------------------
+  // Actions land on server threads and are applied here on the main loop, so
+  // everything below stays single-threaded. talk is level-state (the key is
+  // held or it is not); the rest are edge requests.
+  std::atomic<bool> ui_talk{false};
+  std::atomic<int> latch_req{-1}, side_req{-1};
+  std::atomic<int> gain_req{0};
+  std::atomic<bool> gain_pending{false};
+  std::atomic<bool> quit_req{false};
+
+  std::unique_ptr<ControlServer> ui;
+  if (cfg.ui_port != 0) {
+    ui = std::make_unique<ControlServer>(
+        kPanelHtml,
+        [&](const std::string& verb, const std::string& arg) {
+          if (verb == "talk") ui_talk.store(arg == "on");
+          else if (verb == "latch") latch_req.store(arg == "on" ? 1 : 0);
+          else if (verb == "sidetone") side_req.store(arg == "on" ? 1 : 0);
+          else if (verb == "gain") {
+            gain_req.store(std::atoi(arg.c_str()));
+            gain_pending.store(true);
+          } else if (verb == "quit") quit_req.store(true);
+        });
+    std::string ui_err;
+    if (ui->Start(cfg.ui_port, &ui_err)) {
+      std::printf("[ui] panel at http://127.0.0.1:%u\n", cfg.ui_port);
+      if (cfg.open_browser) {
+        const std::string url = "http://127.0.0.1:" + std::to_string(cfg.ui_port);
+        ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+      }
+    } else {
+      std::printf("WARNING: %s -- running without the panel\n", ui_err.c_str());
+      ui.reset();
+    }
+  }
+
+  // Ops log: the last few operational lines, mirrored to the panel's ticker.
+  std::vector<std::string> ops_log;
+  const auto log_op = [&](const std::string& line) {
+    std::printf("\n[zcomms] %s\n", line.c_str());
+    ops_log.push_back(line);
+    if (ops_log.size() > 5) ops_log.erase(ops_log.begin());
+  };
+  log_op("station up -- channel " + channel.channel_id());
+
   std::set<unsigned int> invited;
   bool latched = cfg.start_latched;
   bool quit = false;
+  bool talking = false;
   double gain_db = cfg.gain_db;
+  bool sidetone_on = cfg.sidetone;
   const int64_t end_ns =
       cfg.run_seconds > 0
           ? NowNs() + static_cast<int64_t>(cfg.run_seconds) * 1'000'000'000LL
@@ -405,9 +475,7 @@ int Run(int argc, char** argv) {
         if (!m.supports_talkback) {
           static std::set<unsigned int> warned;
           if (warned.insert(m.user_id).second) {
-            std::printf("\n[zoom] %s cannot receive talkback (web client?) -- "
-                        "skipping\n",
-                        m.name.c_str());
+            log_op(m.name + " cannot receive talkback (web client) -- skipped");
           }
           continue;
         }
@@ -416,19 +484,92 @@ int Run(int argc, char** argv) {
       if (!fresh.empty()) {
         if (channel.InviteUsers(fresh, &err)) {
           for (unsigned int uid : fresh) invited.insert(uid);
-          std::printf("\n[zoom] invited %zu participant(s) to the channel\n",
-                      fresh.size());
+          log_op("invited " + std::to_string(fresh.size()) +
+                 " participant(s) to the channel");
         } else {
-          std::printf("\nWARNING: %s\n", err.c_str());
+          log_op("invite failed: " + err);
         }
       }
     }
 
-    // PTT: SPACE held = talking. GetAsyncKeyState reads the physical key, so
-    // hold-to-talk works without keyup events, which the console cannot give
-    // us. The envelope in the engine makes rapid toggling safe by design.
+    // Publish the panel state. Built every tick and cheap; the server samples
+    // it at its own cadence, so a slow tab costs nothing here.
+    if (ui) {
+      std::string status = MeetingStatusName(zoom.status());
+      for (char& c : status) {
+        if (c == '_') c = ' ';
+      }
+      double peak = 0.0;
+      uint64_t sends = 0, unders = 0;
+      if (engine) {
+        const EngineStats es = engine->stats();
+        peak = es.capture_peak;
+        sends = es.pacer.sends;
+        unders = es.pacer.underruns;
+      } else if (test_pacer) {
+        const PacerStats p = test_pacer->stats();
+        sends = p.sends;
+        unders = p.underruns;
+        peak = talking || true ? 0.25 : 0.0;  // test tone nominal level
+      }
+      std::string j = "{";
+      j += "\"meeting\":\"" + std::to_string(cfg.meeting_number) + "\",";
+      j += "\"status\":\"" + status + "\",";
+      j += std::string("\"channel_ready\":") +
+           (channel.channel_ready() ? "true," : "false,");
+      j += "\"listeners\":" + std::to_string(channel.users_joined()) + ",";
+      j += std::string("\"talking\":") + (talking ? "true," : "false,");
+      j += std::string("\"latched\":") + (latched ? "true," : "false,");
+      j += std::string("\"sidetone\":") + (sidetone_on ? "true," : "false,");
+      j += "\"gain\":" + std::to_string(static_cast<int>(gain_db)) + ",";
+      char pk[32];
+      std::snprintf(pk, sizeof(pk), "%.4f", peak);
+      j += std::string("\"peak\":") + pk + ",";
+      j += "\"sends\":" + std::to_string(sends) + ",";
+      j += "\"underruns\":" + std::to_string(unders) + ",";
+      j += "\"fails\":" + std::to_string(channel.send_failures()) + ",";
+      j += "\"roster\":[";
+      bool first = true;
+      for (const RosterMember& m : roster.others()) {
+        if (!first) j += ",";
+        first = false;
+        j += "{\"name\":\"" + JsonEscape(m.name) + "\",";
+        j += std::string("\"tb\":") + (m.supports_talkback ? "true," : "false,");
+        j += std::string("\"invited\":") +
+             (invited.count(m.user_id) ? "true}" : "false}");
+      }
+      j += "],\"log\":[";
+      first = true;
+      for (const std::string& l : ops_log) {
+        if (!first) j += ",";
+        first = false;
+        j += "\"" + JsonEscape(l) + "\"";
+      }
+      j += "]}";
+      ui->PublishState(j);
+    }
+
+    // Apply control-surface edges on the main loop.
+    if (quit_req.load()) quit = true;
+    {
+      const int lr = latch_req.exchange(-1);
+      if (lr >= 0) latched = lr == 1;
+      const int sr = side_req.exchange(-1);
+      if (sr >= 0) {
+        sidetone_on = sr == 1;
+        if (engine) engine->SetSidetoneEnabled(sidetone_on);
+      }
+      if (gain_pending.exchange(false)) {
+        gain_db = static_cast<double>(gain_req.load());
+        if (engine) engine->SetInputGainDb(gain_db);
+      }
+    }
+
+    // PTT: physical SPACE held, OR the panel's key held, OR latched. The
+    // envelope in the engine makes rapid toggling safe by design.
     const bool space_down = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
-    if (engine) engine->SetTalk(latched || space_down);
+    talking = latched || space_down || ui_talk.load();
+    if (engine) engine->SetTalk(talking);
 
     while (_kbhit()) {
       const int c = _getch();
@@ -437,12 +578,10 @@ int Run(int argc, char** argv) {
         case 'l': case 'L':
           latched = !latched;
           break;
-        case 'm': case 'M': {
-          static bool st = cfg.sidetone;
-          st = !st;
-          if (engine) engine->SetSidetoneEnabled(st);
+        case 'm': case 'M':
+          sidetone_on = !sidetone_on;
+          if (engine) engine->SetSidetoneEnabled(sidetone_on);
           break;
-        }
         case '+': case '=':
           gain_db += 1.0;
           if (engine) engine->SetInputGainDb(gain_db);

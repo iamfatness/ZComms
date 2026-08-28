@@ -86,8 +86,8 @@ endif()
 # zcomms -- the talkback panel itself. Phase 1's first vertical slice.
 # ---------------------------------------------------------------------------
 if(ZCOMMS_HAVE_SDK)
-  add_executable(zcomms src/app/main.cpp)
-  target_link_libraries(zcomms PRIVATE zcomms_zoom winmm)
+  add_executable(zcomms src/app/main.cpp src/app/control_server.cpp)
+  target_link_libraries(zcomms PRIVATE zcomms_zoom winmm ws2_32 shell32)
   if(MSVC)
     # /W3, SDK headers included transitively.
     target_compile_options(zcomms PRIVATE /W3 /utf-8)
