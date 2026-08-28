@@ -59,8 +59,26 @@ h2{font-size:10px;letter-spacing:.3em;color:var(--silk);font-weight:500;
 .roster li.no{color:var(--silk);border-left-color:var(--talk)}
 .roster small{font-size:9px;letter-spacing:.1em;color:var(--silk)}
 .roster li.tb small{color:var(--ok)}
-/* channel module */
+/* channel modules */
 .chan{display:flex;flex-direction:column;align-items:center;gap:16px}
+.bank{display:flex;flex-wrap:wrap;justify-content:center;gap:14px;width:100%}
+.mod{display:flex;flex-direction:column;align-items:center;gap:10px;
+  background:#22252b;border:1px solid var(--line);border-radius:8px;
+  padding:14px 16px;min-width:170px;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+.mod .plate{padding:6px 16px}
+.mod .plate b{font-size:15px;letter-spacing:.26em}
+.mod .key{width:150px;padding:22px 0 19px;font-size:19px;border-radius:9px;
+  border-bottom-width:5px}
+.mod .key.hot{transform:translateY(4px)}
+.mod .tog{padding:7px 14px;font-size:10px}
+/* roster channel chips */
+.chips{display:flex;gap:4px}
+.chip{appearance:none;cursor:pointer;border:1px solid #000;border-radius:4px;
+  width:22px;height:20px;font:700 10px var(--mono);color:var(--silk);
+  background:linear-gradient(180deg,#2e323a,#24272d)}
+.chip.on{color:#0e0f11;background:var(--ok);box-shadow:0 0 8px rgba(70,196,110,.4)}
+.chip:focus-visible{outline:2px solid var(--bone);outline-offset:2px}
 .plate{background:#14161a;border:1px solid #000;border-radius:6px;
   padding:10px 34px;text-align:center;
   box-shadow:inset 0 2px 6px rgba(0,0,0,.7), 0 1px 0 rgba(255,255,255,.05)}
@@ -131,14 +149,10 @@ h2{font-size:10px;letter-spacing:.3em;color:var(--silk);font-weight:500;
       <h2>PANEL</h2>
       <ul class="roster" id="roster"><li>no one yet</li></ul>
     </section>
-    <section class="chan" aria-label="channel">
-      <div class="plate"><b id="chname">PANEL 1</b><span id="chsub">channel forming…</span></div>
-      <button class="key" id="talk" aria-pressed="false">
-        <span class="cap">TALK</span>
-      </button>
-      <div class="hint">HOLD KEY OR SPACE · LATCH FOR HANDS-FREE</div>
+    <section class="chan" aria-label="channels">
+      <div class="bank" id="bank"></div>
+      <div class="hint">HOLD A KEY (OR DIGIT) · SPACE = ALL CALL · LATCH FOR HANDS-FREE</div>
       <div class="row">
-        <button class="tog" id="latch">LATCH</button>
         <button class="tog" id="side">SIDETONE</button>
       </div>
     </section>
@@ -172,19 +186,47 @@ function meter(peak){
   [...vu.children].forEach((seg,i)=>seg.classList.toggle('on',i<lit));
 }
 
-/* TALK key: pointer + spacebar, hold semantics. The server ORs this with the
-   console's physical spacebar, so either surface can key the channel. */
-const key=$('talk');let held=false;
-function setHeld(v){if(held===v)return;held=v;act('talk',v?'on':'off');}
-key.addEventListener('pointerdown',e=>{key.setPointerCapture(e.pointerId);setHeld(true);});
-key.addEventListener('pointerup',()=>setHeld(false));
-key.addEventListener('pointercancel',()=>setHeld(false));
-addEventListener('keydown',e=>{if(e.code==='Space'&&!e.repeat){e.preventDefault();setHeld(true);}});
-addEventListener('keyup',e=>{if(e.code==='Space'){e.preventDefault();setHeld(false);}});
-addEventListener('blur',()=>setHeld(false));
+/* Channel modules are built once the first state arrives, then updated in
+   place. Each TALK key holds per-channel; digits 1..9 hold from the keyboard;
+   SPACE (all-call) lives server-side on the physical key. */
+const bank=$('bank');
+let mods=[];
+function buildBank(n){
+  bank.innerHTML='';mods=[];
+  for(let i=0;i<n;i++){
+    const mod=document.createElement('div');mod.className='mod';
+    const plate=document.createElement('div');plate.className='plate';
+    const nm=document.createElement('b');nm.textContent='CH '+(i+1);
+    const sub=document.createElement('span');sub.textContent='—';
+    plate.append(nm,sub);
+    const key=document.createElement('button');key.className='key';
+    key.setAttribute('aria-pressed','false');
+    const cap=document.createElement('span');cap.className='cap';
+    cap.textContent='TALK';key.appendChild(cap);
+    let held=false;
+    const setHeld=v=>{if(held===v)return;held=v;act('talk',i+' '+(v?'on':'off'));};
+    key.addEventListener('pointerdown',e=>{key.setPointerCapture(e.pointerId);setHeld(true);});
+    key.addEventListener('pointerup',()=>setHeld(false));
+    key.addEventListener('pointercancel',()=>setHeld(false));
+    const latch=document.createElement('button');latch.className='tog';
+    latch.textContent='LATCH';
+    latch.onclick=()=>act('latch',i+' '+(S.channels[i].latched?'off':'on'));
+    mod.append(plate,key,latch);bank.appendChild(mod);
+    mods.push({sub,key,latch,setHeld});
+  }
+}
+/* digits 1..9 as per-channel PTT */
+addEventListener('keydown',e=>{
+  const d=e.code.startsWith('Digit')?+e.code.slice(5):0;
+  if(d>=1&&d<=mods.length&&!e.repeat){e.preventDefault();mods[d-1].setHeld(true);}
+});
+addEventListener('keyup',e=>{
+  const d=e.code.startsWith('Digit')?+e.code.slice(5):0;
+  if(d>=1&&d<=mods.length){e.preventDefault();mods[d-1].setHeld(false);}
+});
+addEventListener('blur',()=>mods.forEach(m=>m.setHeld(false)));
 
-$('latch').onclick=()=>act('latch',S.latched?'off':'on');
-$('side').onclick=()=>act('sidetone',S.sidetone?'off':'on');
+$('side').onclick=()=>act('sidetone',(S.sidetone?'off':'on'));
 $('g-dn').onclick=()=>act('gain',(S.gain-1));
 $('g-up').onclick=()=>act('gain',(S.gain+1));
 
@@ -193,16 +235,22 @@ es.onmessage=ev=>{S=JSON.parse(ev.data);render();};
 es.onerror=()=>{$('state').textContent='LINK LOST';$('led-link').classList.remove('on');};
 
 function render(){
+  const chans=S.channels||[];
+  if(mods.length!==chans.length)buildBank(chans.length);
   $('meet').textContent='MTG '+(S.meeting||'—');
   $('state').textContent=S.status||'—';
+  const anyReady=chans.some(c=>c.ready);
   $('led-link').classList.toggle('on',S.status==='IN MEETING');
-  $('led-ch').classList.toggle('on',!!S.channel_ready);
-  $('led-tx').classList.toggle('on',!!S.talking&&!!S.channel_ready);
-  key.classList.toggle('hot',!!S.talking);
-  key.setAttribute('aria-pressed',!!S.talking);
-  $('latch').classList.toggle('on',!!S.latched);
+  $('led-ch').classList.toggle('on',anyReady);
+  $('led-tx').classList.toggle('on',!!S.talking&&anyReady);
+  chans.forEach((c,i)=>{
+    const m=mods[i];if(!m)return;
+    m.sub.textContent=c.ready?(c.listeners+' listening'):'forming…';
+    m.key.classList.toggle('hot',!!c.keyed);
+    m.key.setAttribute('aria-pressed',!!c.keyed);
+    m.latch.classList.toggle('on',!!c.latched);
+  });
   $('side').classList.toggle('on',!!S.sidetone);
-  $('chsub').textContent=S.channel_ready?(S.listeners+' listening'):'channel forming…';
   $('g-val').textContent=(S.gain>0?'+':'')+S.gain+' dB';
   $('s-send').textContent=S.sends;
   $('s-under').textContent=S.underruns;
@@ -213,9 +261,22 @@ function render(){
     const li=document.createElement('li');
     li.className=m.tb?'tb':'no';
     const nm=document.createElement('span');nm.textContent=m.name;
-    const tag=document.createElement('small');
-    tag.textContent=m.tb?(m.invited?'ON CH':'INVITING'):'NO TALKBACK';
-    li.append(nm,tag);r.appendChild(li);
+    li.appendChild(nm);
+    if(m.tb){
+      const chips=document.createElement('span');chips.className='chips';
+      (m.chans||[]).forEach((on,i)=>{
+        const b=document.createElement('button');b.className='chip'+(on?' on':'');
+        b.textContent=i+1;
+        b.title=(on?'Remove from':'Add to')+' CH '+(i+1);
+        b.onclick=()=>act('assign',i+':'+m.uid+' '+(on?'off':'on'));
+        chips.appendChild(b);
+      });
+      li.appendChild(chips);
+    }else{
+      const tag=document.createElement('small');tag.textContent='NO TALKBACK';
+      li.appendChild(tag);
+    }
+    r.appendChild(li);
   });
   if(!(S.roster||[]).length){r.innerHTML='<li>no one yet</li>';}
   const ops=$('ops');ops.innerHTML='';

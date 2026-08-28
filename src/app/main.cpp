@@ -34,7 +34,7 @@
 #include "engine.h"
 #include "frame_ring.h"
 #include "roster.h"
-#include "talkback_source.h"
+#include "talkback_channels.h"
 #include "tx_pacer.h"
 #include "ui_html.h"
 #include "zoom_client.h"
@@ -73,6 +73,24 @@ struct AppConfig {
   // The browser panel / control API (plan §6.4). 0 disables.
   uint16_t ui_port = 7350;
   bool open_browser = false;
+  // Talkback channels to create (1..16). Participants land on CH 1 by
+  // default; the panel moves them.
+  int channels = 1;
+};
+
+// The seam between the paced TX thread and the channel bank. "Nothing keyed"
+// is a normal quiet state, not a send failure.
+class ChannelBankSink : public FrameSink {
+ public:
+  explicit ChannelBankSink(TalkbackChannels* bank) : bank_(bank) {}
+  bool CanSend() override { return bank_->channels_ready() > 0; }
+  bool Send(const int16_t* pcm, int samples) override {
+    if (bank_->key_mask() == 0) return true;
+    return bank_->SendToKeyed(pcm, samples) > 0;
+  }
+
+ private:
+  TalkbackChannels* bank_;
 };
 
 std::string JsonEscape(const std::string& s) {
@@ -169,6 +187,8 @@ USAGE
 OPTIONS
   --meeting <url|id>   Meeting to join (or meeting_number in local.env).
   --passcode <pw>      Meeting passcode if not in the URL.
+  --channels <n>       Talkback channels to create, 1..16. Default 1. New
+                       participants land on CH 1; the panel moves them.
   --name <s>           Display name in the participant list. Default ZComms.
   --in <s>             Microphone device substring. Default: system default.
   --out <s>            Sidetone output device substring.
@@ -229,6 +249,7 @@ int Run(int argc, char** argv) {
     else if (a == "--latch") cfg.start_latched = true;
     else if (a == "--test-signal") cfg.test_signal = true;
     else if (a == "--seconds") cfg.run_seconds = std::atoi(next("--seconds"));
+    else if (a == "--channels") cfg.channels = std::atoi(next("--channels"));
     else if (a == "--no-ui") cfg.ui_port = 0;
     else if (a == "--ui-port") cfg.ui_port = static_cast<uint16_t>(std::atoi(next("--ui-port")));
     else if (a == "--open") cfg.open_browser = true;
@@ -287,9 +308,14 @@ int Run(int argc, char** argv) {
   Roster roster;
   roster.Attach(zoom.GetParticipantsController());
 
-  // --- Channel bring-up (co-host retry, as proven in the spike) -------------
-  ZoomTalkbackSource channel(zoom.GetTalkbackController());
-  if (!channel.meeting_supports_talkback()) {
+  // --- Channel bring-up (host/co-host retry, as proven in the spike) --------
+  const int n_channels =
+      cfg.channels < 1 ? 1
+                       : (cfg.channels > TalkbackChannels::kMaxChannels
+                              ? TalkbackChannels::kMaxChannels
+                              : cfg.channels);
+  TalkbackChannels bank(zoom.GetTalkbackController());
+  if (!bank.meeting_supports_talkback()) {
     std::printf("ERROR: this meeting does not support talkback.\n");
     zoom.Leave();
     zoom.Cleanup();
@@ -297,31 +323,38 @@ int Run(int argc, char** argv) {
   }
   bool created = false;
   for (int attempt = 0; attempt < 120 && !created; ++attempt) {
-    if (channel.CreateChannel(&err)) {
-      for (int i = 0; i < 100 && !channel.channel_ready(); ++i) zoom.Pump(100);
-      created = channel.channel_ready();
+    if (bank.channels_ready() == 0) {
+      // Request the whole bank in one call; CreateChannel is rate-limited.
+      if (!bank.CreateChannels(n_channels, &err)) {
+        std::printf("[talkback] %s\n", err.c_str());
+      }
     }
+    for (int i = 0; i < 100 && bank.channels_ready() < n_channels; ++i) {
+      zoom.Pump(100);
+    }
+    created = bank.channels_ready() >= n_channels;
     if (!created) {
-      std::printf(">>> promote \"%s\" to CO-HOST in the participant list "
-                  "(retrying, %d)\n",
+      std::printf(">>> promote \"%s\" to HOST or CO-HOST in the participant "
+                  "list (retrying, %d)\n",
                   cfg.display_name.c_str(), attempt + 1);
       zoom.Pump(5000);
     }
   }
   if (!created) {
-    std::printf("ERROR: could not create a talkback channel.\n");
+    std::printf("ERROR: could not create talkback channels.\n");
     zoom.Leave();
     zoom.Cleanup();
     return 1;
   }
-  channel.SetBackgroundVolume(0.2f);  // duck, don't erase, the meeting
-  std::printf("[zoom] channel up\n");
+  bank.SetBackgroundVolumeAll(0.2f);  // duck, don't erase, the meeting
+  std::printf("[zoom] %d channel(s) up\n", n_channels);
 
   // --- Audio path -----------------------------------------------------------
   // Normal mode: the engine, mic through gain/limiter/PTT into the channel.
   // Test mode: an internally generated beep pattern through the same ring and
   // pacer, so the paced TX path is exercised identically -- only the source
   // differs.
+  ChannelBankSink sink(&bank);
   std::unique_ptr<AudioEngine> engine;
   std::unique_ptr<FrameRing> test_ring;
   std::unique_ptr<TxPacer> test_pacer;
@@ -331,7 +364,7 @@ int Run(int argc, char** argv) {
   if (cfg.test_signal) {
     std::printf("[audio] TEST SIGNAL mode: 700/1000 Hz beep pattern\n");
     test_ring = std::make_unique<FrameRing>(50);
-    test_pacer = std::make_unique<TxPacer>(test_ring.get(), &channel, nullptr);
+    test_pacer = std::make_unique<TxPacer>(test_ring.get(), &sink, nullptr);
     test_running.store(true);
     test_gen = std::thread([&test_ring, &test_running]() {
       // 300 ms beep, 200 ms gap, alternating 700 and 1000 Hz, -12 dBFS, with
@@ -380,7 +413,7 @@ int Run(int argc, char** argv) {
     ecfg.monitor_device = cfg.monitor_device;
     ecfg.monitor_enabled = cfg.sidetone;
     ecfg.input_gain_db = cfg.gain_db;
-    engine = std::make_unique<AudioEngine>(ecfg, &channel);
+    engine = std::make_unique<AudioEngine>(ecfg, &sink);
     if (!engine->Start(&err)) {
       std::printf("ERROR: %s\n", err.c_str());
       zoom.Leave();
@@ -401,24 +434,56 @@ int Run(int argc, char** argv) {
   // Actions land on server threads and are applied here on the main loop, so
   // everything below stays single-threaded. talk is level-state (the key is
   // held or it is not); the rest are edge requests.
-  std::atomic<bool> ui_talk{false};
-  std::atomic<int> latch_req{-1}, side_req{-1};
+  // Per-channel: bit i of ui_talk_mask = the panel holds CH i+1's key; latch
+  // likewise but applied as edges. assign requests carry "<slot>:<uid> on".
+  std::atomic<uint32_t> ui_talk_mask{0};
+  std::atomic<int> side_req{-1};
   std::atomic<int> gain_req{0};
   std::atomic<bool> gain_pending{false};
   std::atomic<bool> quit_req{false};
+  std::mutex edge_m;
+  std::vector<std::pair<int, bool>> latch_edges;          // slot, on
+  std::vector<std::tuple<int, unsigned int, bool>> assign_edges;
 
   std::unique_ptr<ControlServer> ui;
   if (cfg.ui_port != 0) {
     ui = std::make_unique<ControlServer>(
         kPanelHtml,
         [&](const std::string& verb, const std::string& arg) {
-          if (verb == "talk") ui_talk.store(arg == "on");
-          else if (verb == "latch") latch_req.store(arg == "on" ? 1 : 0);
-          else if (verb == "sidetone") side_req.store(arg == "on" ? 1 : 0);
-          else if (verb == "gain") {
-            gain_req.store(std::atoi(arg.c_str()));
+          // arg forms: "<slot> on|off" (talk/latch), "<slot>:<uid> on|off"
+          // (assign), "<db>" (gain), "on|off" (sidetone).
+          const auto sp = arg.find(' ');
+          const std::string a1 = sp == std::string::npos ? arg : arg.substr(0, sp);
+          const std::string a2 = sp == std::string::npos ? "" : arg.substr(sp + 1);
+          if (verb == "talk") {
+            const int slot = std::atoi(a1.c_str());
+            const bool on = a2 == "on";
+            uint32_t m = ui_talk_mask.load();
+            for (;;) {
+              const uint32_t next = on ? (m | (1u << slot)) : (m & ~(1u << slot));
+              if (ui_talk_mask.compare_exchange_weak(m, next)) break;
+            }
+          } else if (verb == "latch") {
+            std::lock_guard<std::mutex> lock(edge_m);
+            latch_edges.emplace_back(std::atoi(a1.c_str()), a2 == "on");
+          } else if (verb == "assign") {
+            const auto colon = a1.find(':');
+            if (colon != std::string::npos) {
+              std::lock_guard<std::mutex> lock(edge_m);
+              assign_edges.emplace_back(
+                  std::atoi(a1.substr(0, colon).c_str()),
+                  static_cast<unsigned int>(
+                      std::strtoul(a1.substr(colon + 1).c_str(), nullptr, 10)),
+                  a2 == "on");
+            }
+          } else if (verb == "sidetone") {
+            side_req.store(a1 == "on" ? 1 : 0);
+          } else if (verb == "gain") {
+            gain_req.store(std::atoi(a1.c_str()));
             gain_pending.store(true);
-          } else if (verb == "quit") quit_req.store(true);
+          } else if (verb == "quit") {
+            quit_req.store(true);
+          }
         });
     std::string ui_err;
     if (ui->Start(cfg.ui_port, &ui_err)) {
@@ -440,10 +505,15 @@ int Run(int argc, char** argv) {
     ops_log.push_back(line);
     if (ops_log.size() > 5) ops_log.erase(ops_log.begin());
   };
-  log_op("station up -- channel " + channel.channel_id());
+  log_op("station up -- " + std::to_string(n_channels) + " channel(s)");
 
-  std::set<unsigned int> invited;
-  bool latched = cfg.start_latched;
+  // Membership intent, per (slot, uid). Auto-policy: capable participants
+  // land on CH 1; the panel moves them. Intent is healed against confirmed
+  // membership on the housekeeping cadence.
+  std::set<std::pair<int, unsigned int>> intent;
+  std::set<unsigned int> auto_assigned;
+  // All-call latch (SPACE latches every channel); per-channel latch mask.
+  uint32_t latch_mask = cfg.start_latched ? 0xFFFFFFFFu : 0u;
   bool quit = false;
   bool talking = false;
   double gain_db = cfg.gain_db;
@@ -469,9 +539,8 @@ int Run(int argc, char** argv) {
       next_house_ns = NowNs() + 2'000'000'000LL;
       zoom.AdmitAllWaiting();  // no-op unless we are host
 
-      std::vector<unsigned int> fresh;
+      // Default policy: a new capable participant lands on CH 1.
       for (const RosterMember& m : roster.others()) {
-        if (invited.count(m.user_id) != 0) continue;
         if (!m.supports_talkback) {
           static std::set<unsigned int> warned;
           if (warned.insert(m.user_id).second) {
@@ -479,16 +548,50 @@ int Run(int argc, char** argv) {
           }
           continue;
         }
-        fresh.push_back(m.user_id);
-      }
-      if (!fresh.empty()) {
-        if (channel.InviteUsers(fresh, &err)) {
-          for (unsigned int uid : fresh) invited.insert(uid);
-          log_op("invited " + std::to_string(fresh.size()) +
-                 " participant(s) to the channel");
-        } else {
-          log_op("invite failed: " + err);
+        if (auto_assigned.insert(m.user_id).second) {
+          intent.insert({0, m.user_id});
+          log_op(m.name + " -> CH 1");
         }
+      }
+
+      // Heal intent against confirmed membership: invite what should be in
+      // and is not, remove what should not be and is. One pass, idempotent,
+      // and re-run every cadence so transients fix themselves.
+      const std::vector<ChannelState> snap = bank.Snapshot();
+      for (int s = 0; s < static_cast<int>(snap.size()); ++s) {
+        for (const RosterMember& m : roster.others()) {
+          const bool want = intent.count({s, m.user_id}) != 0;
+          const bool have =
+              snap[static_cast<size_t>(s)].members.count(m.user_id) != 0;
+          if (want && !have && m.supports_talkback) {
+            if (!bank.Invite(s, m.user_id, &err)) {
+              log_op("CH " + std::to_string(s + 1) + " invite failed: " + err);
+            }
+          } else if (!want && have) {
+            if (!bank.Remove(s, m.user_id, &err)) {
+              log_op("CH " + std::to_string(s + 1) + " remove failed: " + err);
+            }
+          }
+        }
+      }
+    }
+
+    // Assignment edges from the panel mutate intent; the healer does the rest.
+    {
+      std::vector<std::pair<int, bool>> ledges;
+      std::vector<std::tuple<int, unsigned int, bool>> aedges;
+      {
+        std::lock_guard<std::mutex> lock(edge_m);
+        ledges.swap(latch_edges);
+        aedges.swap(assign_edges);
+      }
+      for (const auto& [slot, on] : ledges) {
+        if (on) latch_mask |= 1u << slot;
+        else latch_mask &= ~(1u << slot);
+      }
+      for (const auto& [slot, uid, on] : aedges) {
+        if (on) intent.insert({slot, uid});
+        else intent.erase({slot, uid});
       }
     }
 
@@ -512,14 +615,12 @@ int Run(int argc, char** argv) {
         unders = p.underruns;
         peak = talking || true ? 0.25 : 0.0;  // test tone nominal level
       }
+      const std::vector<ChannelState> snap = bank.Snapshot();
+      const uint32_t keys = bank.key_mask();
       std::string j = "{";
       j += "\"meeting\":\"" + std::to_string(cfg.meeting_number) + "\",";
       j += "\"status\":\"" + status + "\",";
-      j += std::string("\"channel_ready\":") +
-           (channel.channel_ready() ? "true," : "false,");
-      j += "\"listeners\":" + std::to_string(channel.users_joined()) + ",";
       j += std::string("\"talking\":") + (talking ? "true," : "false,");
-      j += std::string("\"latched\":") + (latched ? "true," : "false,");
       j += std::string("\"sidetone\":") + (sidetone_on ? "true," : "false,");
       j += "\"gain\":" + std::to_string(static_cast<int>(gain_db)) + ",";
       char pk[32];
@@ -527,16 +628,40 @@ int Run(int argc, char** argv) {
       j += std::string("\"peak\":") + pk + ",";
       j += "\"sends\":" + std::to_string(sends) + ",";
       j += "\"underruns\":" + std::to_string(unders) + ",";
-      j += "\"fails\":" + std::to_string(channel.send_failures()) + ",";
-      j += "\"roster\":[";
+      j += "\"fails\":" + std::to_string(bank.send_failures()) + ",";
+      j += "\"channels\":[";
       bool first = true;
+      for (int s = 0; s < static_cast<int>(snap.size()); ++s) {
+        const ChannelState& c = snap[static_cast<size_t>(s)];
+        if (!first) j += ",";
+        first = false;
+        j += "{\"name\":\"" + JsonEscape(c.name) + "\",";
+        j += std::string("\"ready\":") + (c.ready ? "true," : "false,");
+        j += "\"listeners\":" + std::to_string(c.listeners) + ",";
+        j += std::string("\"keyed\":") +
+             (((keys >> s) & 1u) ? "true," : "false,");
+        j += std::string("\"latched\":") +
+             (((latch_mask >> s) & 1u) ? "true}" : "false}");
+      }
+      j += "],\"roster\":[";
+      first = true;
       for (const RosterMember& m : roster.others()) {
         if (!first) j += ",";
         first = false;
         j += "{\"name\":\"" + JsonEscape(m.name) + "\",";
+        j += "\"uid\":" + std::to_string(m.user_id) + ",";
         j += std::string("\"tb\":") + (m.supports_talkback ? "true," : "false,");
-        j += std::string("\"invited\":") +
-             (invited.count(m.user_id) ? "true}" : "false}");
+        j += "\"chans\":[";
+        bool cf = true;
+        for (int s = 0; s < static_cast<int>(snap.size()); ++s) {
+          if (!cf) j += ",";
+          cf = false;
+          const bool on =
+              snap[static_cast<size_t>(s)].members.count(m.user_id) != 0 ||
+              intent.count({s, m.user_id}) != 0;
+          j += on ? "true" : "false";
+        }
+        j += "]}";
       }
       j += "],\"log\":[";
       first = true;
@@ -549,11 +674,9 @@ int Run(int argc, char** argv) {
       ui->PublishState(j);
     }
 
-    // Apply control-surface edges on the main loop.
+    // Apply remaining control-surface edges.
     if (quit_req.load()) quit = true;
     {
-      const int lr = latch_req.exchange(-1);
-      if (lr >= 0) latched = lr == 1;
       const int sr = side_req.exchange(-1);
       if (sr >= 0) {
         sidetone_on = sr == 1;
@@ -565,10 +688,21 @@ int Run(int argc, char** argv) {
       }
     }
 
-    // PTT: physical SPACE held, OR the panel's key held, OR latched. The
-    // envelope in the engine makes rapid toggling safe by design.
+    // Keying. SPACE is all-call (every channel), the panel keys channels
+    // individually, latch is per-channel state. The bank's key mask is the
+    // single routing truth the TX path reads.
     const bool space_down = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
-    talking = latched || space_down || ui_talk.load();
+    const uint32_t all = (n_channels >= 32) ? 0xFFFFFFFFu
+                                            : ((1u << n_channels) - 1u);
+    const uint32_t keys =
+        (latch_mask | ui_talk_mask.load() | (space_down ? all : 0u)) & all;
+    for (int s = 0; s < n_channels; ++s) {
+      bank.SetKey(s, ((keys >> s) & 1u) != 0);
+    }
+    talking = keys != 0;
+    // The engine's envelope opens when any channel is keyed; per-channel
+    // routing happens at the sink. A channel keyed mid-speech joins at full
+    // level, which is how hardware panels behave.
     if (engine) engine->SetTalk(talking);
 
     while (_kbhit()) {
@@ -576,7 +710,8 @@ int Run(int argc, char** argv) {
       switch (c) {
         case 'q': case 'Q': quit = true; break;
         case 'l': case 'L':
-          latched = !latched;
+          // Console latch toggles all-call latch.
+          latch_mask = (latch_mask & all) == all ? 0u : all;
           break;
         case 'm': case 'M':
           sidetone_on = !sidetone_on;
@@ -596,19 +731,16 @@ int Run(int argc, char** argv) {
 
     if (engine) {
       const EngineStats s = engine->stats();
-      std::printf("\r  [%s] %-6s  ch:%d listener(s)  gain %+.0f dB  "
-                  "underrun %llu   ",
-                  MeterBar(s.capture_peak).c_str(),
-                  (latched ? "LATCH" : (space_down ? "TALK" : "")),
-                  channel.users_joined(), gain_db,
-                  (unsigned long long)s.pacer.underruns);
+      std::printf("\r  [%s] %-6s  keys %02x  gain %+.0f dB  underrun %llu   ",
+                  MeterBar(s.capture_peak).c_str(), (talking ? "TALK" : ""),
+                  keys, gain_db, (unsigned long long)s.pacer.underruns);
     } else if (test_pacer) {
       const PacerStats p = test_pacer->stats();
-      std::printf("\r  [test-signal] ch:%d listener(s)  sends %llu  "
-                  "underrun %llu  fail %llu   ",
-                  channel.users_joined(), (unsigned long long)p.sends,
-                  (unsigned long long)p.underruns,
-                  (unsigned long long)channel.send_failures());
+      std::printf("\r  [test-signal] keys %02x  ready %d/%d  sends %llu  "
+                  "fail %llu   ",
+                  keys, bank.channels_ready(), n_channels,
+                  (unsigned long long)p.sends,
+                  (unsigned long long)bank.send_failures());
     }
   }
 

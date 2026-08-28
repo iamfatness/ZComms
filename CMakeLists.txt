@@ -65,6 +65,7 @@ if(EXISTS "${ZOOM_SDK_DIR}/lib/sdk.lib")
     src/audio/mic_source.cpp
     src/zoom/zoom_client.cpp
     src/zoom/talkback_source.cpp
+    src/zoom/talkback_channels.cpp
     src/zoom/roster.cpp
     src/zoom/jwt.cpp
   )
