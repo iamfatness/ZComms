@@ -238,7 +238,7 @@ void OpenAppWindow(const std::string& url) {
   };
   for (const char* exe : candidates) {
     if (GetFileAttributesA(exe) == INVALID_FILE_ATTRIBUTES) continue;
-    const std::string args = "--app=" + url + " --window-size=1120,800";
+    const std::string args = "--app=" + url + " --window-size=1000,640";
     if (reinterpret_cast<INT_PTR>(ShellExecuteA(nullptr, "open", exe,
                                                 args.c_str(), nullptr,
                                                 SW_SHOWNORMAL)) > 32) {

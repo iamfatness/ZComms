@@ -25,12 +25,13 @@ inline const char* kPanelHtml = R"ZCUI(<!doctype html>
   --mono:"Martian Mono",ui-monospace,Consolas,monospace;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--iron);color:var(--bone);font-family:var(--disp);
-  min-height:100vh;display:grid;place-items:center;padding:24px}
-.rack{width:min(1060px,100%);background:
+html,body{height:100%}
+body{background:var(--iron);color:var(--bone);font-family:var(--disp)}
+/* The panel IS the window: no page around it, no dead matte. It fills the
+   viewport edge to edge and the deck flexes to take all vertical space. */
+.rack{width:100%;height:100%;display:flex;flex-direction:column;background:
   linear-gradient(180deg,var(--bezel-hi),var(--bezel) 12%,var(--bezel) 88%,#202329);
-  border:1px solid var(--line);border-radius:10px;
-  box-shadow:0 24px 60px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.06)}
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
 .rail{display:flex;justify-content:space-between;align-items:center;
   padding:14px 22px;border-bottom:1px solid var(--line)}
 .brand{display:flex;align-items:baseline;gap:12px}
@@ -44,8 +45,11 @@ body{background:var(--iron);color:var(--bone);font-family:var(--disp);
 .led.g.on{color:var(--ok)} .led.g.on i{background:var(--ok)}
 .led.a.on{color:var(--latch)} .led.a.on i{background:var(--latch)}
 .led.r.on{color:var(--talk)} .led.r.on i{background:var(--talk)}
-.deck{display:grid;grid-template-columns:250px 1fr 230px;gap:1px;background:var(--line)}
-.deck>section{background:linear-gradient(180deg,var(--bezel) 0%,#24272d 100%);padding:20px}
+.deck{flex:1;min-height:0;display:grid;grid-template-columns:250px 1fr 230px;
+  gap:1px;background:var(--line)}
+.deck>section{background:linear-gradient(180deg,var(--bezel) 0%,#24272d 100%);
+  padding:20px;overflow-y:auto}
+.chan{justify-content:center}
 h2{font-size:10px;letter-spacing:.3em;color:var(--silk);font-weight:500;
   margin-bottom:14px;text-shadow:0 1px 0 rgba(255,255,255,.05)}
 /* station */
@@ -134,7 +138,7 @@ h2{font-size:10px;letter-spacing:.3em;color:var(--silk);font-weight:500;
 .gain b{font:13px var(--mono);min-width:64px;text-align:center}
 /* ops line */
 .ops{border-top:1px solid var(--line);padding:10px 22px;
-  font:11px var(--mono);color:var(--silk);min-height:36px;
+  font:11px var(--mono);color:var(--silk);min-height:36px;flex-shrink:0;
   display:flex;gap:26px;overflow:hidden;white-space:nowrap}
 .ops span{color:var(--ink-dim)}
 @media (max-width:820px){.deck{grid-template-columns:1fr}.vu{flex-direction:row;height:26px;width:100%}}
