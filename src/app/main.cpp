@@ -768,6 +768,8 @@ int Run(int argc, char** argv) {
   std::map<std::pair<int, unsigned int>, std::pair<int, int64_t>>
       invite_backoff;
   int heal_rr = 0;  // round-robin start slot for the one-call-per-pass healer
+  int64_t next_heal_ns = 0;
+  uint32_t prev_keys = 0;  // for keyed-an-empty-channel warnings
   // All-call latch (SPACE latches every channel); per-channel latch mask.
   uint32_t latch_mask = cfg.start_latched ? 0xFFFFFFFFu : 0u;
   bool quit = false;
@@ -870,13 +872,17 @@ int Run(int argc, char** argv) {
         }
       }
 
-      // Heal intent against confirmed membership: invite what should be in
-      // and is not, remove what should not be and is. ONE membership call
-      // per pass, rotated across channels -- Zoom's limiter is per CALL, so
-      // even per-channel batches fired back-to-back in one sweep draw code
-      // 18 (proven live twice today: first one call per person, then one
-      // batch per channel). One call every 2s fills a full desk in seconds
-      // and never trips it; a refused person still backs off 5s..60s.
+    }
+
+    // Membership healing on its own, faster cadence: ONE call per tick,
+    // rotated across channels -- Zoom's limiter is per CALL, so even
+    // per-channel batches fired back-to-back in one sweep draw code 18
+    // (proven live twice today: first one call per person, then one batch
+    // per channel). 600ms per call sits inside the limiter (CoreVideo's
+    // create ladder paces at 300ms) and fills an 8-person desk in ~5s;
+    // a refused person still backs off 5s..60s.
+    if (NowNs() >= next_heal_ns && bank.channels_ready() > 0) {
+      next_heal_ns = NowNs() + 600'000'000LL;
       const std::vector<ChannelState> snap = bank.Snapshot();
       const int heal_n = static_cast<int>(snap.size());
       bool acted = false;
@@ -1081,6 +1087,27 @@ int Run(int argc, char** argv) {
     for (int s = 0; s < n_channels; ++s) {
       bank.SetKey(s, ((keys >> s) & 1u) != 0);
     }
+    // Keying a line whose person has not landed yet (invite in flight) is
+    // the silent-failure the 15:05 live test hit: audio to nobody, no
+    // feedback. Say it, once per key-down, only for channels somebody is
+    // MEANT to be on -- all-call sweeping empty spares is normal.
+    const uint32_t newly_keyed = keys & ~prev_keys;
+    if (newly_keyed != 0) {
+      const std::vector<ChannelState> ks = bank.Snapshot();
+      for (int s = 0; s < n_channels && s < static_cast<int>(ks.size()); ++s) {
+        if (((newly_keyed >> s) & 1u) == 0) continue;
+        if (!ks[static_cast<size_t>(s)].members.empty()) continue;
+        bool meant = false;
+        for (const auto& iv : intent) {
+          if (iv.first == s) { meant = true; break; }
+        }
+        if (meant) {
+          log_op("CH " + std::to_string(s + 1) +
+                 " keyed -- nobody is in it yet (invite in flight)");
+        }
+      }
+    }
+    prev_keys = keys;
     talking = keys != 0;
     // The engine's envelope opens when any channel is keyed; per-channel
     // routing happens at the sink. A channel keyed mid-speech joins at full

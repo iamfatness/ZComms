@@ -92,6 +92,9 @@ h2{font:10px var(--mono);letter-spacing:.30em;color:var(--dim);font-weight:400;
 .key:active{background:#1F242B}
 .key:focus-visible{outline:1px solid var(--amber);outline-offset:3px}
 .key.hot{background:var(--red);border-color:var(--red);color:#12141A;font-weight:700}
+/* keyed, but the channel is empty: armed amber, not on-air red -- the
+   operator must be able to see "I am talking to nobody" at a glance */
+.key.armed{background:#1B1810;border-color:var(--amber);color:var(--amber)}
 /* toggles: armed = amber */
 .tog{appearance:none;cursor:pointer;border:1px solid var(--edge);
   padding:14px 22px;font:500 13px var(--mono);letter-spacing:.26em;
@@ -328,7 +331,9 @@ function render(){
   $('led-tx').classList.toggle('on',!!S.talking&&anyReady);
   $('allrow').classList.add('show');
   const allKeyed=chans.length&&chans.every(c=>c.keyed);
-  $('allkey').classList.toggle('hot',!!allKeyed);
+  const allHearing=allKeyed&&chans.some(c=>c.listeners>0);
+  $('allkey').classList.toggle('hot',!!allHearing);
+  $('allkey').classList.toggle('armed',!!allKeyed&&!allHearing);
   $('allkey').setAttribute('aria-pressed',!!allKeyed);
   $('alllatch').classList.toggle('on',chans.length&&chans.every(c=>c.latched));
   chans.forEach((c,i)=>{
@@ -343,9 +348,11 @@ function render(){
     m.sub.textContent=c.ready?(c.label?('direct · ch '+(i+1))
                                       :(c.listeners+' listening'))
                              :'forming…';
-    m.key.classList.toggle('hot',!!c.keyed);
+    m.key.classList.toggle('hot',!!c.keyed&&c.listeners>0);
+    m.key.classList.toggle('armed',!!c.keyed&&!(c.listeners>0));
     m.key.setAttribute('aria-pressed',!!c.keyed);
     m.latch.classList.toggle('on',!!c.latched);
+    if(c.keyed&&!(c.listeners>0))m.sub.textContent='nobody in channel';
   });
   $('side').classList.toggle('on',!!S.sidetone);
   $('aec').classList.toggle('on',!!S.aec);
