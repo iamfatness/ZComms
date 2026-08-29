@@ -149,6 +149,29 @@ the exe); if the download or the runtime is absent the app falls back to the
 old Edge/Chrome `--app` window. This is also the Mac-port shape: same panel
 HTML, WKWebView shell.
 
+### The app identity's join boundary (2026-08-29, live-diagnosed)
+
+**Under the PKCE public-app-key identity, ZComms can only guest-join meetings
+hosted by the Zoom account that authorized the app.** A cross-account meeting
+fails with `MEETING_FAIL_APP_CAN_NOT_ANONYMOUS_JOIN_MEETING` (504) -- decoded
+into operator language now. This is an auth-tier property, not a bug; it
+gates who can use ZComms against whose meetings until the app has its own
+Marketplace identity (§3.7) with guest join approved. Test meetings must be
+started from the authorizing account.
+
+Related traps fixed the same session (`zoom_client.cpp`):
+
+- **FAILED's code gets clobbered by the ENDED that follows it** (ENDED
+  carries result 0). Latch the FAILED code; report it from the ENDED branch.
+- **`IMeetingConfigurationEvent` must be implemented.** A passcode-protected
+  meeting joined by bare ID asks for the passcode via
+  onInputMeetingPasswordAndScreenNameNotification; with no listener the join
+  dies opaquely. The panel's join card doubles as the passcode prompt
+  (`/act "passcode <v>"`, wrong-passcode retry included); the name+email
+  prompt (onJoinMeetingNeedUserInfo) is answered inline.
+- `Join()` takes an `on_tick`: the panel mirrors WAITING_FOR_HOST /
+  IN_WAITING_ROOM / passcode states while Join blocks.
+
 ### The app outlives its meetings (2026-08-29)
 
 `Run()` is a session cycle: join card → meeting session (a lambda) → back to
