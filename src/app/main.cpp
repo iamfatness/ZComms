@@ -359,6 +359,7 @@ int Run(int argc, char** argv) {
   std::vector<std::tuple<int, unsigned int, bool>> assign_edges;
   std::mutex join_m;
   std::string join_pending;
+  std::string passcode_pending;
 
   std::unique_ptr<ControlServer> ui;
   if (cfg.ui_port != 0) {
@@ -393,6 +394,9 @@ int Run(int argc, char** argv) {
             // The whole argument is the pasted link (it may contain spaces).
             std::lock_guard<std::mutex> lock(join_m);
             join_pending = arg;
+          } else if (verb == "passcode") {
+            std::lock_guard<std::mutex> lock(join_m);
+            passcode_pending = a1;
           } else if (verb == "sidetone") {
             side_req.store(a1 == "on" ? 1 : 0);
           } else if (verb == "aec") {
@@ -517,8 +521,47 @@ int Run(int argc, char** argv) {
   std::printf("[zoom] joining meeting %llu as \"%s\" -- admit it if a waiting "
               "room is on\n",
               (unsigned long long)cfg.meeting_number, cfg.display_name.c_str());
+  // The join tick: keep the panel honest while Join blocks, and run the
+  // passcode conversation when the meeting demands one the operator didn't
+  // paste (bare meeting IDs do this; full invite links carry the passcode).
+  int last_pc_state = 0;
+  ZOOM_SDK_NAMESPACE::MeetingStatus last_js =
+      ZOOM_SDK_NAMESPACE::MEETING_STATUS_IDLE;
+  const auto join_tick = [&]() {
+    // Mirror real SDK status to the panel; "ADMIT..." while the SDK sits in
+    // WAITING_FOR_HOST reads as a hang from the operator's chair.
+    const ZOOM_SDK_NAMESPACE::MeetingStatus js = zoom.status();
+    if (js != last_js && zoom.passcode_state() == 0) {
+      last_js = js;
+      if (js == ZOOM_SDK_NAMESPACE::MEETING_STATUS_WAITINGFORHOST) {
+        publish_phase("joining", "WAITING FOR THE HOST TO START THE MEETING");
+      } else if (js == ZOOM_SDK_NAMESPACE::MEETING_STATUS_IN_WAITING_ROOM) {
+        publish_phase("joining", "IN THE WAITING ROOM -- ADMIT \"" +
+                                     cfg.display_name + "\"");
+      } else if (js == ZOOM_SDK_NAMESPACE::MEETING_STATUS_RECONNECTING) {
+        publish_phase("joining", "RECONNECTING...");
+      }
+    }
+    const int pc = zoom.passcode_state();
+    if (pc != 0 && pc != last_pc_state) {
+      publish_phase("joining", pc == 2 ? "WRONG PASSCODE -- TRY AGAIN"
+                                       : "ENTER THE MEETING PASSCODE");
+    }
+    last_pc_state = pc;
+    if (pc != 0) {
+      std::string p;
+      {
+        std::lock_guard<std::mutex> lock(join_m);
+        p.swap(passcode_pending);
+      }
+      if (!p.empty()) {
+        publish_phase("joining", "CHECKING PASSCODE...");
+        zoom.SubmitPasscode(p);
+      }
+    }
+  };
   if (!zoom.Join(cfg.meeting_number, cfg.meeting_password, cfg.display_name,
-                 600000, &err)) {
+                 600000, &err, join_tick)) {
     log_op("could not join: " + err);
     zoom.Cleanup();
     return -1;

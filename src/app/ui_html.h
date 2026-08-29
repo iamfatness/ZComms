@@ -245,8 +245,11 @@ addEventListener('keyup',e=>{
 });
 addEventListener('blur',()=>mods.forEach(m=>m.setHeld(false)));
 
+const needPass=()=>S.phase==='joining'&&/PASSCODE/.test(S.status||'');
 const joinNow=()=>{const v=$('joinurl').value.trim();
-  if(v){act('join',v);$('joinstate').textContent='connecting…';}};
+  if(!v)return;
+  if(needPass()){act('passcode',v);$('joinurl').value='';$('joinstate').textContent='checking…';}
+  else{act('join',v);$('joinstate').textContent='connecting…';}};
 $('joinbtn').onclick=joinNow;
 $('joinurl').addEventListener('keydown',e=>{if(e.key==='Enter')joinNow();});
 $('side').onclick=()=>act('sidetone',(S.sidetone?'off':'on'));
@@ -267,6 +270,12 @@ function render(){
     $('state').textContent=S.status||'—';
     $('joinstate').textContent=(S.phase==='joining')?(S.status||'connecting…')
                                                     :'paste the Zoom link';
+    // The join card doubles as the passcode prompt mid-join.
+    const pass=needPass();
+    $('joincard').classList.add('show');
+    $('joinurl').placeholder=pass?'meeting passcode'
+                                 :'https://zoom.us/j/…  or meeting ID';
+    $('joinbtn').textContent=pass?'SUBMIT':'CONNECT';
     $('meet').textContent='MTG —';
     ['led-link','led-ch','led-tx'].forEach(i=>$(i).classList.remove('on'));
     const ops=$('ops');ops.innerHTML='';
