@@ -21,12 +21,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iostream>
 #include <memory>
 #include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "app_identity.h"
 #include "audio_defs.h"
 #include "clock.h"
 #include "control_server.h"
@@ -75,7 +77,9 @@ struct AppConfig {
   int run_seconds = 0;  // 0 = run until Q
   // The browser panel / control API (plan §6.4). 0 disables.
   uint16_t ui_port = 7350;
-  bool open_browser = false;
+  // The panel opens itself by default: a packaged app's face is the panel,
+  // and a double-clicked exe that silently listens on a port looks broken.
+  bool open_browser = true;
   // Talkback channels to create (1..16). Participants land on CH 1 by
   // default; the panel moves them.
   int channels = 1;
@@ -146,10 +150,21 @@ bool ParseMeetingArg(const std::string& input, uint64_t* number,
 }
 
 void LoadLocalEnv(AppConfig* cfg, std::string* meeting_arg) {
-  // Same gitignored file the spike uses, searched from cwd upward one level,
-  // so running from the repo root or from src/app both work.
-  for (const char* path : {"local.env", "spikes/a-tx-latency/local.env",
-                           "../local.env"}) {
+  // Search order: dev files near the repo first, then the installed
+  // location -- %APPDATA%\ZComms\config.env -- which is where a packaged
+  // install keeps overrides. No file at all is a fully working state: the
+  // app identity is baked in, and the meeting comes from the command line or
+  // the interactive prompt.
+  std::vector<std::string> paths = {"local.env",
+                                    "spikes/a-tx-latency/local.env",
+                                    "../local.env"};
+  char* appdata = nullptr;
+  size_t len = 0;
+  if (_dupenv_s(&appdata, &len, "APPDATA") == 0 && appdata != nullptr) {
+    paths.push_back(std::string(appdata) + "\\ZComms\\config.env");
+    free(appdata);
+  }
+  for (const std::string& path : paths) {
     std::ifstream f(path);
     if (!f.is_open()) continue;
     std::string line;
@@ -257,6 +272,7 @@ int Run(int argc, char** argv) {
     else if (a == "--no-ui") cfg.ui_port = 0;
     else if (a == "--ui-port") cfg.ui_port = static_cast<uint16_t>(std::atoi(next("--ui-port")));
     else if (a == "--open") cfg.open_browser = true;
+    else if (a == "--no-open") cfg.open_browser = false;
     else {
       std::printf("ERROR: unknown argument %s\n\n", a.c_str());
       PrintUsage();
@@ -265,16 +281,27 @@ int Run(int argc, char** argv) {
   }
 
   LoadLocalEnv(&cfg, &meeting_arg);
+  if (cfg.public_app_key.empty()) cfg.public_app_key = kDefaultPublicAppKey;
 
-  if (meeting_arg.empty() ||
-      !ParseMeetingArg(meeting_arg, &cfg.meeting_number, &cfg.meeting_password)) {
-    std::printf("ERROR: no meeting. Pass --meeting <url|id> or set "
-                "meeting_number in local.env.\n\n");
-    PrintUsage();
-    return 2;
+  // A packaged exe gets double-clicked. No meeting on the command line is a
+  // conversation, not an error: ask for the join link the way a person would
+  // paste it.
+  if (meeting_arg.empty()) {
+    std::printf("ZComms %s -- talkback panel\n\n", kAppVersion);
+    std::printf("Paste the Zoom meeting link (or meeting ID) and press "
+                "Enter:\n> ");
+    std::string line;
+    if (!std::getline(std::cin, line) || line.empty()) {
+      PrintUsage();
+      return 2;
+    }
+    meeting_arg = line;
   }
-  if (cfg.public_app_key.empty()) {
-    std::printf("ERROR: no public_app_key found in local.env.\n");
+  if (!ParseMeetingArg(meeting_arg, &cfg.meeting_number,
+                       &cfg.meeting_password)) {
+    std::printf("ERROR: could not read a meeting id out of \"%s\".\n\n",
+                meeting_arg.c_str());
+    PrintUsage();
     return 2;
   }
 
@@ -497,8 +524,33 @@ int Run(int argc, char** argv) {
           ? NowNs() + static_cast<int64_t>(cfg.run_seconds) * 1'000'000'000LL
           : 0;
 
+  // Main-loop watchdog: the one AppHangB1 on record stalled this loop with
+  // no output and no crash dump -- the worst kind of failure to diagnose
+  // after the fact. The watchdog cannot fix a hang, but it converts "the app
+  // silently stopped" into a loud, timestamped record of exactly when the
+  // loop last ran, in the console and therefore in any captured log.
+  std::atomic<int64_t> heartbeat_ns{NowNs()};
+  std::atomic<bool> watchdog_running{true};
+  std::thread watchdog([&heartbeat_ns, &watchdog_running]() {
+    bool reported = false;
+    while (watchdog_running.load()) {
+      Sleep(1000);
+      const int64_t age_ms = (NowNs() - heartbeat_ns.load()) / 1'000'000;
+      if (age_ms > 5000 && !reported) {
+        reported = true;
+        std::printf("\n[watchdog] MAIN LOOP STALLED for %lld ms -- if this "
+                    "persists the app is hung (known: AppHangB1, see "
+                    "CLAUDE.md)\n",
+                    static_cast<long long>(age_ms));
+      } else if (age_ms < 1000) {
+        reported = false;
+      }
+    }
+  });
+
   while (!quit && zoom.in_meeting()) {
     if (end_ns != 0 && NowNs() >= end_ns) break;
+    heartbeat_ns.store(NowNs());
     zoom.Pump(30);
 
     // Host duties + membership healing, on a coarse cadence. Invite anyone
@@ -723,6 +775,8 @@ int Run(int argc, char** argv) {
   }
 
   // --- Teardown -------------------------------------------------------------
+  watchdog_running.store(false);
+  if (watchdog.joinable()) watchdog.join();
   std::printf("\n[zoom] leaving...\n");
   if (engine) {
     engine->SetTalk(false);

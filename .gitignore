@@ -34,6 +34,10 @@ local.env
 # Spike measurement output
 *.csv
 
+# Release staging: contains the non-redistributable-in-public Zoom SDK
+# runtime. Hand zips to operators directly; never commit or publish them.
+dist/
+
 # Editors / OS
 .vscode/
 .idea/
