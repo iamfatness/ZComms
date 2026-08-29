@@ -27,10 +27,14 @@ set(MINIAUDIO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio")
 add_library(zcomms_audio STATIC
   src/audio/frame_ring.cpp
   src/audio/tx_pacer.cpp
+  src/audio/signal.cpp
+  src/audio/correlator.cpp
+  src/audio/generator.cpp
   src/audio/envelope.cpp
   src/audio/limiter.cpp
   src/audio/frame_accumulator.cpp
   src/audio/devices.cpp
+  src/audio/loopback.cpp
   src/audio/wav_sink.cpp
   src/audio/engine.cpp
   src/audio/miniaudio_impl.cpp
@@ -60,9 +64,17 @@ endif()
 # redistributable and is gitignored (plan §3.5), so a fresh clone has none.
 # ---------------------------------------------------------------------------
 if(EXISTS "${ZOOM_SDK_DIR}/lib/sdk.lib")
-  add_library(zcomms_zoom STATIC src/audio/mic_source.cpp)
+  add_library(zcomms_zoom STATIC
+    src/audio/mic_source.cpp
+    src/zoom/zoom_client.cpp
+    src/zoom/talkback_source.cpp
+    src/zoom/talkback_channels.cpp
+    src/zoom/roster.cpp
+    src/zoom/jwt.cpp
+  )
   target_link_libraries(zcomms_zoom PUBLIC zcomms_audio "${ZOOM_SDK_DIR}/lib/sdk.lib")
-  target_include_directories(zcomms_zoom PUBLIC "${ZOOM_SDK_DIR}/h")
+  target_link_libraries(zcomms_zoom PRIVATE bcrypt)
+  target_include_directories(zcomms_zoom PUBLIC "${ZOOM_SDK_DIR}/h" src/zoom)
   if(MSVC)
     target_compile_options(zcomms_zoom PRIVATE /W3 /utf-8)
   endif()
@@ -72,6 +84,32 @@ else()
   message(STATUS
     "Zoom SDK not found at ${ZOOM_SDK_DIR} -- building the engine only.\n"
     "   The SDK is not redistributable and is fetched separately (plan §3.5).")
+endif()
+
+# ---------------------------------------------------------------------------
+# zcomms -- the talkback panel itself. Phase 1's first vertical slice.
+# ---------------------------------------------------------------------------
+if(ZCOMMS_HAVE_SDK)
+  add_executable(zcomms src/app/main.cpp src/app/control_server.cpp)
+  target_link_libraries(zcomms PRIVATE zcomms_zoom winmm ws2_32 shell32)
+  if(MSVC)
+    # /W3, SDK headers included transitively.
+    target_compile_options(zcomms PRIVATE /W3 /utf-8)
+  endif()
+  add_custom_command(TARGET zcomms POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+            "${ZOOM_SDK_DIR}/bin" "$<TARGET_FILE_DIR:zcomms>"
+    COMMENT "Staging Zoom SDK runtime beside zcomms")
+endif()
+
+# ---------------------------------------------------------------------------
+# zcomms-tap: end-to-end verifier's far end. Taps every playback endpoint and
+# detects the --test-signal beep pattern. No SDK needed.
+# ---------------------------------------------------------------------------
+add_executable(zcomms-tap tools/tap-detect/main.cpp)
+target_link_libraries(zcomms-tap PRIVATE zcomms_audio)
+if(MSVC)
+  target_compile_options(zcomms-tap PRIVATE /W4 /permissive- /utf-8)
 endif()
 
 # ---------------------------------------------------------------------------

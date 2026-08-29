@@ -66,6 +66,13 @@ class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
   // The talkback controller for this meeting, or null.
   ZOOM_SDK_NAMESPACE::IMeetingTalkbackController* GetTalkbackController();
 
+  ZOOM_SDK_NAMESPACE::IMeetingParticipantsController* GetParticipantsController();
+
+  // Admits everyone currently in the waiting room. Host/co-host only; a
+  // no-permission failure is expected when not host and is not an error worth
+  // surfacing every tick.
+  bool AdmitAllWaiting();
+
   // Every participant except this client -- the people a talkback channel
   // would be addressed to.
   std::vector<unsigned int> GetOtherParticipants();

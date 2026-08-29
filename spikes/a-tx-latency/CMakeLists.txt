@@ -13,12 +13,10 @@
 # lets the tests exercise the whole signal/correlation/timebase chain on a
 # machine with no meeting and no sound card.
 # ---------------------------------------------------------------------------
+# signal, correlator and generator promoted to src/audio (zcomms_audio).
 add_library(spike_a_core STATIC
-  src/signal.cpp
-  src/correlator.cpp
   src/stats.cpp
   src/timebase.cpp
-  src/generator.cpp
   src/probe.cpp
 )
 target_include_directories(spike_a_core PUBLIC src)
@@ -47,13 +45,12 @@ add_test(NAME spike_a_tests COMMAND spike_a_tests)
 # a normal state for a fresh clone, not a failure.
 # ---------------------------------------------------------------------------
 if(ZCOMMS_HAVE_SDK)
+  # zoom_client, talkback_source and jwt were promoted to src/zoom (the
+  # product's zcomms_zoom library); the spike consumes them from there.
+  # loopback promoted to src/audio alongside the rest of the device layer.
   add_executable(zcomms_spike_a
     src/main.cpp
-    src/loopback.cpp
-    src/zoom_client.cpp
-    src/talkback_source.cpp
     src/config.cpp
-    src/jwt.cpp
   )
   target_link_libraries(zcomms_spike_a PRIVATE spike_a_core zcomms_zoom winmm bcrypt)
   if(MSVC)

@@ -18,17 +18,12 @@
 #include <string>
 #include <vector>
 
+#include "devices.h"
 #include "tx_pacer.h"
 
 namespace zc {
 
-struct AudioDeviceInfo {
-  std::string name;
-  bool is_default = false;
-  int index = 0;
-};
-
-std::vector<AudioDeviceInfo> ListPlaybackDevices();
+// Device enumeration lives in devices.h (DeviceInfo / ListPlaybackDevices).
 
 // Captures the render stream of a playback device, converted to 48 kHz mono
 // float regardless of the device's native format.

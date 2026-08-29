@@ -40,6 +40,58 @@ scripted PTT cycle produces clean gating in the recorded WAV with no clipping.
 press/release pattern so ramp behaviour is inspectable without a person
 holding a key.
 
+### zcomms — the talkback panel (Phase 1 slice), END-TO-END VERIFIED
+
+`zcomms.exe` (src/app) is the product's core loop, live-verified 2026-08-27
+in a **fully automated** run: joined the meeting, was made host, created the
+channel, **auto-admitted** the listener from the waiting room
+(`AdmitAllToMeeting`), auto-invited it, and the 700/1000 Hz test signal was
+detected at the listening client's render endpoint at ~10^7:1 dominance
+(`zcomms-tap`, Goertzel across every playback endpoint).
+
+Operational truths that run established, beyond Spike A's list:
+
+- **The Zoom web client cannot receive talkback** (`IUserInfo::
+  IsSupportTalkback()` = false; inviting it fails INVALID_PARAMETER). The
+  roster carries the flag and the app skips and says so. Panelists must be on
+  a native client.
+- **The web client's host menu has no "Make Co-Host"** — only "Make Host".
+  Host works fine for channel creation, and zcomms-as-host is the smoothest
+  operational shape: it admits its own listeners.
+- Verification without ears: `zcomms --latch --test-signal` transmits a
+  700/1000 Hz beep pattern through the same ring/pacer as live audio;
+  `zcomms-tap` finds it. This pair is the repeatable e2e test.
+
+### Multi-channel: ROUTING PRIVACY VERIFIED LIVE (2026-08-29)
+
+The intercom's core claim proven against a real meeting with the
+matched-filter e2e: with a native listener confirmed on CH 1 —
+
+- **CH 1 keyed** → probe detected at the listener: 7/8 bursts, correlation
+  peak **0.978**, PSR 5.8.
+- **CH 2 keyed only** (8 s of audio transmitted into it throughout) → the
+  CH 1 listener heard **nothing**: 0 bursts, peak 0.270 / PSR 1.2 = floor.
+
+Same transmitter, listener, bus; only the key differed. Channel isolation is
+real. Re-run any time: bring up `zcomms --channels 2 --test-signal`, then
+`POST /act "talk <slot> on|off"` + `zcomms-tap` per phase — no silence
+needed since the chirp/matched-filter rework.
+
+Open defects (2026-08-28), still standing:
+
+- **zcomms main-thread hang (AppHangB1), one occurrence.** ~40 s after a
+  phase that sent 8 s of audio into an **empty** channel, the main loop
+  stopped pumping and Windows killed the process. Not reproduced (2026-08-29's
+  phase B also sent into an empty-of-listeners keyed channel without
+  incident). Instrument before trusting long unattended runs.
+- ~~zcomms-tap Goertzel fragility~~ — fixed 2026-08-28: chirp probe +
+  matched-filter/PSR detection; field-proven both directions on a noisy bus.
+
+Also observed: a dead web session can linger as a **ghost participant
+holding host** for ~1–2 min; it can even kick joiners. Wait it out — host
+auto-reassigns (twice it landed on zcomms itself, which the retry loop turns
+into a win).
+
 ### Spike A — RESULT: the thesis survives
 
 Measured live 2026-08-26 against a real meeting, over the **talkback

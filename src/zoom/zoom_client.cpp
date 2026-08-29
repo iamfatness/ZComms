@@ -13,6 +13,7 @@
 #include "meeting_service_components/meeting_audio_interface.h"
 #include "meeting_service_components/meeting_participants_ctrl_interface.h"
 #include "meeting_service_components/meeting_talkback_ctrl_interface.h"
+#include "meeting_service_components/meeting_waiting_room_interface.h"
 #include "rawdata/zoom_rawdata_api.h"
 
 using namespace ZOOM_SDK_NAMESPACE;
@@ -411,6 +412,18 @@ void ZoomClient::onAppSignalPanelUpdated(IMeetingAppSignalHandler*) {}
 
 IMeetingTalkbackController* ZoomClient::GetTalkbackController() {
   return meeting_ != nullptr ? meeting_->GetMeetingTalkbackController() : nullptr;
+}
+
+IMeetingParticipantsController* ZoomClient::GetParticipantsController() {
+  return meeting_ != nullptr ? meeting_->GetMeetingParticipantsController()
+                             : nullptr;
+}
+
+bool ZoomClient::AdmitAllWaiting() {
+  if (meeting_ == nullptr) return false;
+  IMeetingWaitingRoomController* wr = meeting_->GetMeetingWaitingRoomController();
+  if (wr == nullptr) return false;
+  return wr->AdmitAllToMeeting() == SDKERR_SUCCESS;
 }
 
 std::vector<unsigned int> ZoomClient::GetOtherParticipants() {
