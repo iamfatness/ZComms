@@ -1,10 +1,10 @@
-# Builds and stages a distributable ZComms zip.
+# Builds and stages ZComms: a zip and an NSIS installer (per-user, no UAC).
 #
-# The output zip contains the Zoom Meeting SDK runtime, which is licensed for
-# distribution INSIDE an app built against the Marketplace app identity, but
-# not for posting to a public repository. So: this script writes dist\ locally
-# and dist\ is gitignored -- hand the zip to operators directly; never commit
-# or publish it as a public release asset.
+# Distribution decision (owner, 2026-08-29): installers ARE published as
+# GitHub release assets -- the Zoom SDK runtime ships INSIDE the app, which
+# is the licensed shape and exactly how CoreVideo's public releases ship the
+# same runtime. The SDK still never lands in the repo TREE (third_party/ is
+# gitignored); dist\ stays gitignored too.
 #
 # Signing: when the Microsoft developer account lands, the signtool call slots
 # in at the marked point below; nothing else changes.
@@ -59,4 +59,16 @@ $zip = Join-Path $dist "ZComms-$Version.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path "$stage\*" -DestinationPath $zip
 $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
-Write-Host "== done: $zip ($mb MB) =="
+Write-Host "== zip done: $zip ($mb MB) =="
+
+Write-Host "== installer =="
+$makensis = @("C:\Program Files (x86)\NSIS\makensis.exe",
+              "C:\Program Files\NSIS\makensis.exe") |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $makensis) { throw "makensis not found -- install NSIS" }
+$setup = Join-Path $dist "ZComms-Setup-$Version.exe"
+& $makensis "/DVERSION=$Version" "/DSOURCE_DIR=$stage" "/DOUT_FILE=$setup" `
+    (Join-Path $PSScriptRoot "installer.nsi") | Select-Object -Last 3
+if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
+$smb = [math]::Round((Get-Item $setup).Length / 1MB, 1)
+Write-Host "== done: $setup ($smb MB) =="
