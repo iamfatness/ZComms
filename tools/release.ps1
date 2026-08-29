@@ -36,6 +36,12 @@ Copy-Item "$repo\build\Release\zcomms.exe" $stage
 Copy-Item "$repo\build\Release\zcomms-tap.exe" $stage
 Copy-Item "$repo\build\Release\zcomms-engine.exe" $stage
 
+# The WebView2 loader for the shell window (redistributable; the runtime
+# itself is evergreen on the user's machine).
+if (Test-Path "$repo\build\Release\WebView2Loader.dll") {
+    Copy-Item "$repo\build\Release\WebView2Loader.dll" $stage
+}
+
 # The Zoom SDK runtime the exe loads at start (sdk.dll and its dependency
 # tree). The whole bin directory: the SDK's loader pulls pieces lazily and a
 # minimal set is a support incident waiting to happen.

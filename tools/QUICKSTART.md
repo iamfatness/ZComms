@@ -7,13 +7,16 @@ recording hearing a word.
 
 ## Start a session
 
-1. **Double-click `zcomms.exe`** and paste the meeting link when asked
-   (or run `zcomms --meeting <link>` from a terminal).
+1. **Double-click `zcomms.exe`** — the panel opens in its own window. Paste
+   the meeting link into the JOIN A MEETING card and hit CONNECT (or run
+   `zcomms --meeting <link>` from a terminal).
 2. In the meeting, **admit "ZComms"** from the waiting room, then make it
    **Host or Co-Host** (Participants → More). It needs that role to create
    channels — it will keep retrying while you do this. As host it also admits
    your panelists for you.
-3. Your browser opens the panel automatically (`http://127.0.0.1:7350`).
+3. If a join fails, the reason appears in the ticker at the bottom and the
+   join card comes back — fix the cause and connect again. Closing the
+   window quits the app.
 
 ## Use the panel
 

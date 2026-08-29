@@ -33,6 +33,9 @@
 #include "audio_defs.h"
 #include "clock.h"
 #include "control_server.h"
+#ifdef ZCOMMS_HAVE_WEBVIEW2
+#include "shell_window.h"
+#endif
 #include "devices.h"
 #include "engine.h"
 #include "frame_ring.h"
@@ -405,7 +408,17 @@ int Run(int argc, char** argv) {
     if (ui->Start(cfg.ui_port, &ui_err)) {
       const std::string url = "http://127.0.0.1:" + std::to_string(cfg.ui_port);
       std::printf("[ui] panel at %s\n", url.c_str());
-      if (cfg.open_browser) OpenAppWindow(url);
+      if (cfg.open_browser) {
+        // The app's own window first (WebView2, panel at its designed
+        // 1000x640); a borrowed browser frame only if the runtime is absent.
+        // Closing the shell window is quitting the app.
+        bool shown = false;
+#ifdef ZCOMMS_HAVE_WEBVIEW2
+        shown = StartShellWindow(url, 1000, 640,
+                                 [&quit_req]() { quit_req.store(true); });
+#endif
+        if (!shown) OpenAppWindow(url);
+      }
     } else {
       std::printf("WARNING: %s -- running without the panel\n", ui_err.c_str());
       ui.reset();

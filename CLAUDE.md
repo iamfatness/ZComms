@@ -138,6 +138,17 @@ Verified before the live run:
 Run `--self-test` before believing any live figure; the live run has no ground
 truth by construction, so that is the only place the instrument gets checked.
 
+### The panel is a native window (2026-08-29)
+
+`src/app/shell_window.cpp` hosts the panel in **WebView2** on a dedicated STA
+thread (the main thread pumps the Zoom SDK and must never own a UI message
+loop). Client area is exactly the panel's designed 1000x640; closing the
+window quits the app (`on_closed` -> `quit_req`). The SDK is fetched at
+configure time from NuGet into `build/webview2/` (loader DLL staged beside
+the exe); if the download or the runtime is absent the app falls back to the
+old Edge/Chrome `--app` window. This is also the Mac-port shape: same panel
+HTML, WKWebView shell.
+
 ### The app outlives its meetings (2026-08-29)
 
 `Run()` is a session cycle: join card → meeting session (a lambda) → back to
