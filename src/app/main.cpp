@@ -108,11 +108,23 @@ class ChannelBankSink : public FrameSink {
   bool CanSend() override { return bank_->channels_ready() > 0; }
   bool Send(const int16_t* pcm, int samples) override {
     if (bank_->key_mask() == 0) return true;
+    // The peak of what actually leaves for Zoom, post-envelope: the number
+    // that separates "transmitting your voice" from "keyed but shipping
+    // silence" (an envelope/mute defect) at a glance.
+    int peak = 0;
+    for (int i = 0; i < samples; ++i) {
+      const int a = pcm[i] < 0 ? -pcm[i] : pcm[i];
+      if (a > peak) peak = a;
+    }
+    tx_peak_.store(peak);
     return bank_->SendToKeyed(pcm, samples) > 0;
   }
+  // 0..32767; only meaningful while something is keyed.
+  int tx_peak() const { return tx_peak_.load(); }
 
  private:
   TalkbackChannels* bank_;
+  std::atomic<int> tx_peak_{0};
 };
 
 std::string JsonEscape(const std::string& s) {
@@ -363,7 +375,7 @@ int Run(int argc, char** argv) {
   // or a mutex-guarded edge list applied later on the main thread.
   std::atomic<uint32_t> ui_talk_mask{0};
   std::atomic<bool> ui_allcall{false};  // the panel's ALL CALL key
-  std::atomic<int> side_req{-1}, aec_req{-1};
+  std::atomic<int> side_req{-1}, aec_req{-1}, tone_req{-1};
   std::atomic<int> gain_req{0};
   std::atomic<bool> gain_pending{false};
   std::atomic<bool> quit_req{false};
@@ -373,6 +385,8 @@ int Run(int argc, char** argv) {
   std::mutex join_m;
   std::string join_pending;
   std::string passcode_pending;
+  std::mutex dev_m;
+  std::string mic_pending, out_pending;  // device switches from settings
 
   // The operator's Zoom session. signed_in mirrors the token store so the
   // idle loop can gate the join card without a disk read per tick; --anon
@@ -423,6 +437,15 @@ int Run(int argc, char** argv) {
           } else if (verb == "gain") {
             gain_req.store(std::atoi(a1.c_str()));
             gain_pending.store(true);
+          } else if (verb == "tone") {
+            tone_req.store(a1 == "on" ? 1 : 0);
+          } else if (verb == "setmic") {
+            // Device names carry spaces; the whole argument is the name.
+            std::lock_guard<std::mutex> lock(dev_m);
+            mic_pending = arg;
+          } else if (verb == "setout") {
+            std::lock_guard<std::mutex> lock(dev_m);
+            out_pending = arg;
           } else if (verb == "talkall") {
             ui_allcall.store(a1 == "on");
           } else if (verb == "latchall") {
@@ -769,7 +792,13 @@ int Run(int argc, char** argv) {
       invite_backoff;
   int heal_rr = 0;  // round-robin start slot for the one-call-per-pass healer
   int64_t next_heal_ns = 0;
-  uint32_t prev_keys = 0;  // for keyed-an-empty-channel warnings
+  uint32_t prev_keys = 0;      // for keyed-an-empty-channel warnings
+  uint32_t prev_sent_mask = 0; // for first-audio-into-channel notices
+  int64_t keyed_silent_since = 0;
+  // Device lists for the settings drawer, refreshed on a lazy cadence --
+  // WASAPI enumeration is cheap but not free, and devices rarely change.
+  int64_t next_dev_ns = 0;
+  std::string dev_json;
   // All-call latch (SPACE latches every channel); per-channel latch mask.
   uint32_t latch_mask = cfg.start_latched ? 0xFFFFFFFFu : 0u;
   bool quit = false;
@@ -966,6 +995,25 @@ int Run(int argc, char** argv) {
 
     // Publish the panel state. Built every tick and cheap; the server samples
     // it at its own cadence, so a slow tab costs nothing here.
+    if (ui && NowNs() >= next_dev_ns) {
+      next_dev_ns = NowNs() + 5'000'000'000LL;
+      std::string dj = "\"mics\":[";
+      bool df = true;
+      for (const auto& d : ListCaptureDevices()) {
+        if (!df) dj += ",";
+        df = false;
+        dj += "\"" + JsonEscape(d.name) + "\"";
+      }
+      dj += "],\"outs\":[";
+      df = true;
+      for (const auto& d : ListPlaybackDevices()) {
+        if (!df) dj += ",";
+        df = false;
+        dj += "\"" + JsonEscape(d.name) + "\"";
+      }
+      dj += "]";
+      dev_json = dj;
+    }
     if (ui) {
       std::string status = MeetingStatusName(zoom.status());
       for (char& c : status) {
@@ -1006,6 +1054,8 @@ int Run(int argc, char** argv) {
       j += std::string("\"sidetone\":") + (sidetone_on ? "true," : "false,");
       j += std::string("\"aec\":") +
            ((engine && engine->aec_enabled()) ? "true," : "false,");
+      j += std::string("\"tone\":") +
+           ((engine && engine->test_tone()) ? "true," : "false,");
       j += "\"gain\":" + std::to_string(static_cast<int>(gain_db)) + ",";
       char pk[32];
       std::snprintf(pk, sizeof(pk), "%.4f", peak);
@@ -1013,6 +1063,13 @@ int Run(int argc, char** argv) {
       j += "\"sends\":" + std::to_string(sends) + ",";
       j += "\"underruns\":" + std::to_string(unders) + ",";
       j += "\"fails\":" + std::to_string(bank.send_failures()) + ",";
+      j += "\"chsends\":" + std::to_string(bank.channel_sends()) + ",";
+      j += "\"txpeak\":" + std::to_string(sink.tx_peak()) + ",";
+      j += "\"mic\":\"" +
+           JsonEscape(engine ? engine->capture_device_name() : "") + "\",";
+      j += "\"out\":\"" +
+           JsonEscape(engine ? engine->monitor_device_name() : "") + "\",";
+      j += dev_json + ",";
       j += "\"channels\":[";
       bool first = true;
       for (int s = 0; s < static_cast<int>(snap.size()); ++s) {
@@ -1069,9 +1126,42 @@ int Run(int argc, char** argv) {
       }
       const int ar = aec_req.exchange(-1);
       if (ar >= 0 && engine) engine->SetAecEnabled(ar == 1);
+      const int tr = tone_req.exchange(-1);
+      if (tr >= 0 && engine) {
+        engine->SetTestTone(tr == 1);
+        log_op(tr == 1 ? "test tone ON -- replaces the mic in the live chain"
+                       : "test tone off");
+      }
       if (gain_pending.exchange(false)) {
         gain_db = static_cast<double>(gain_req.load());
         if (engine) engine->SetInputGainDb(gain_db);
+      }
+      // Device switches from the settings drawer: restart the engine on the
+      // new device. A short gap in the mic is inherent to changing it.
+      std::string want_mic, want_out;
+      {
+        std::lock_guard<std::mutex> lock(dev_m);
+        want_mic.swap(mic_pending);
+        want_out.swap(out_pending);
+      }
+      if ((!want_mic.empty() || !want_out.empty()) && engine) {
+        if (!want_mic.empty()) cfg.mic_device = want_mic;
+        if (!want_out.empty()) cfg.monitor_device = want_out;
+        const bool aec_on = engine->aec_enabled();
+        engine->SetTalk(false);
+        engine->Stop();
+        EngineConfig ecfg;
+        ecfg.capture_device = cfg.mic_device;
+        ecfg.monitor_device = cfg.monitor_device;
+        ecfg.monitor_enabled = sidetone_on;
+        ecfg.input_gain_db = gain_db;
+        ecfg.aec = aec_on;
+        engine = std::make_unique<AudioEngine>(ecfg, &sink);
+        if (!engine->Start(&err)) {
+          log_op("audio device switch failed: " + err);
+        } else {
+          log_op("mic: " + engine->capture_device_name());
+        }
       }
     }
 
@@ -1112,6 +1202,39 @@ int Run(int argc, char** argv) {
     }
     prev_keys = keys;
     talking = keys != 0;
+
+    // TX truth-telling, both directions: name the first moment Zoom accepts
+    // audio for each channel, and call out a transmitter that is keyed but
+    // shipping silence while the mic is live at capture -- the two halves
+    // the 15:05 no-audio hunt could not separate.
+    {
+      const uint32_t now_sent = bank.sent_mask();
+      const uint32_t new_sent = now_sent & ~prev_sent_mask;
+      if (new_sent != 0) {
+        for (int s = 0; s < n_channels; ++s) {
+          if ((new_sent >> s) & 1u) {
+            log_op("audio flowing into CH " + std::to_string(s + 1));
+          }
+        }
+        prev_sent_mask = now_sent;
+      }
+      if (talking && engine) {
+        const EngineStats es = engine->stats();
+        if (es.capture_peak > 0.03 && sink.tx_peak() < 100) {
+          if (keyed_silent_since == 0) {
+            keyed_silent_since = NowNs();
+          } else if (NowNs() - keyed_silent_since > 1'500'000'000LL) {
+            log_op("keyed but transmitting SILENCE (mic live at capture) -- "
+                   "envelope/AEC path suspect");
+            keyed_silent_since = NowNs();
+          }
+        } else {
+          keyed_silent_since = 0;
+        }
+      } else {
+        keyed_silent_since = 0;
+      }
+    }
     // The engine's envelope opens when any channel is keyed; per-channel
     // routing happens at the sink. A channel keyed mid-speech joins at full
     // level, which is how hardware panels behave.

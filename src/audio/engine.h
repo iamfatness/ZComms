@@ -94,6 +94,14 @@ class AudioEngine {
   void SetTalk(bool on);
   bool talking() const { return talk_.load(); }
 
+  // Replaces the microphone with a 700 Hz tone INSIDE the capture chain --
+  // it then rides gain, limiter, PTT envelope, ring and pacer exactly as a
+  // voice would. The A/B that separates "the transmit path is broken" from
+  // "the microphone signal is broken" in one key press (built for the
+  // 2026-08-29 tones-heard-voice-not hunt).
+  void SetTestTone(bool on) { test_tone_.store(on); }
+  bool test_tone() const { return test_tone_.load(); }
+
   void SetInputGainDb(double db);
   void SetSidetoneDb(double db);
   void SetSidetoneEnabled(bool on);
@@ -132,6 +140,8 @@ class AudioEngine {
 
   std::atomic<bool> talk_{false};
   std::atomic<bool> sidetone_on_{true};
+  std::atomic<bool> test_tone_{false};
+  double tone_phase_ = 0.0;  // capture thread only
   std::atomic<uint64_t> frames_to_ring_{0};
   std::atomic<double> capture_peak_{0.0};
 

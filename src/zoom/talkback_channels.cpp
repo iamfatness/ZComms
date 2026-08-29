@@ -222,6 +222,8 @@ int TalkbackChannels::SendToKeyed(const int16_t* pcm, int samples) {
         kSampleRate, ZoomSDKAudioChannel_Mono);
     if (err == SDKERR_SUCCESS) {
       ++sent;
+      channel_sends_.fetch_add(1);
+      sent_mask_.fetch_or(1u << i);
     } else {
       send_failures_.fetch_add(1);
     }

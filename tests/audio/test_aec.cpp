@@ -125,6 +125,35 @@ void TestAec() {
   }
 
   {
+    ZC_TEST("a zero-lag self-reference passes through (measured, not assumed)");
+    // Bench note from the 2026-08-29 no-audio hunt: the engine used to feed
+    // the SIDETONE (the operator's own voice) to FeedPlayback. The obvious
+    // fear -- the canceller eats the voice it correlates with -- does NOT
+    // happen at zero lag: measured 0.4 dB. The wiring was still wrong (the
+    // reference must be far-end playback, not the operator), and OnMonitor
+    // no longer feeds it; this pins the measured behavior so the incident
+    // notes stay honest about what the canceller did and did not do.
+    EchoCanceller aec(kSampleRate, kFrameSamples, 200);
+    const int total = kSampleRate * 6;
+    const std::vector<float> voice = FarEnd(total, 99);
+    std::vector<float> out;
+    std::vector<float> mic(static_cast<size_t>(kFrameSamples));
+    for (int off = 0; off + kFrameSamples <= total; off += kFrameSamples) {
+      aec.FeedPlayback(voice.data() + off, kFrameSamples);
+      std::copy(voice.begin() + off, voice.begin() + off + kFrameSamples,
+                mic.begin());
+      aec.ProcessCapture(mic.data());
+      out.insert(out.end(), mic.begin(), mic.end());
+    }
+    const size_t tail = static_cast<size_t>(total - 2 * kSampleRate);
+    const double in_db = EnergyDb(voice, tail);
+    const double out_db = EnergyDb(out, tail);
+    std::printf("    voice in %.1f dB -> out %.1f dB (delta %.1f dB)\n",
+                in_db, out_db, in_db - out_db);
+    ZC_CHECK(std::fabs(in_db - out_db) <= 3.0);
+  }
+
+  {
     ZC_TEST("bypass leaves audio untouched");
     EchoCanceller aec(kSampleRate, kFrameSamples, 200);
     aec.SetEnabled(false);
