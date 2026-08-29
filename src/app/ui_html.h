@@ -254,12 +254,19 @@ function buildBank(n){
     mods.push({mod,nm,sub,key,latch,setHeld});
   }
 }
-/* digits 1..9 as per-channel PTT */
+/* Keyboard, PANEL-SCOPED on purpose: digits 1..9 key channels, SPACE is
+   all-call -- but only while the panel window has focus and the operator
+   is not typing in a field. The old global space hook opened an all-call
+   from any app on any typed space. */
+const typing=e=>e.target&&(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA');
 addEventListener('keydown',e=>{
+  if(typing(e))return;
+  if(e.code==='Space'){e.preventDefault();if(!e.repeat)allSet(true);return;}
   const d=e.code.startsWith('Digit')?+e.code.slice(5):0;
   if(d>=1&&d<=mods.length&&!e.repeat){e.preventDefault();mods[d-1].setHeld(true);}
 });
 addEventListener('keyup',e=>{
+  if(e.code==='Space'){allSet(false);return;}
   const d=e.code.startsWith('Digit')?+e.code.slice(5):0;
   if(d>=1&&d<=mods.length){e.preventDefault();mods[d-1].setHeld(false);}
 });

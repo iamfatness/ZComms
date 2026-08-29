@@ -1075,15 +1075,18 @@ int Run(int argc, char** argv) {
       }
     }
 
-    // Keying. SPACE is all-call (every channel), the panel keys channels
-    // individually, latch is per-channel state. The bank's key mask is the
-    // single routing truth the TX path reads.
-    const bool space_down = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+    // Keying. The panel keys channels individually (digits + SPACE live in
+    // the panel window, focus-scoped); ALL CALL spans the bank; latch is
+    // per-channel state. The bank's key mask is the single routing truth
+    // the TX path reads. There is deliberately NO global keyboard hook: a
+    // GetAsyncKeyState(VK_SPACE) all-call fired while typing a space in ANY
+    // app -- an open mic to the whole panel from a chat window (owner,
+    // live 2026-08-29: "the space bar can't be the shortcut").
     const uint32_t all = (n_channels >= 32) ? 0xFFFFFFFFu
                                             : ((1u << n_channels) - 1u);
     const uint32_t keys =
         (latch_mask | ui_talk_mask.load() |
-         ((space_down || ui_allcall.load()) ? all : 0u)) & all;
+         (ui_allcall.load() ? all : 0u)) & all;
     for (int s = 0; s < n_channels; ++s) {
       bank.SetKey(s, ((keys >> s) & 1u) != 0);
     }
