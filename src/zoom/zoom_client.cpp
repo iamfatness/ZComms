@@ -576,6 +576,10 @@ bool ZoomClient::AdmitAllWaiting() {
   return wr->AdmitAllToMeeting() == SDKERR_SUCCESS;
 }
 
+IMeetingBOController* ZoomClient::GetBOController() {
+  return meeting_ != nullptr ? meeting_->GetMeetingBOController() : nullptr;
+}
+
 std::vector<unsigned int> ZoomClient::GetOtherParticipants() {
   std::vector<unsigned int> out;
   if (meeting_ == nullptr) return out;

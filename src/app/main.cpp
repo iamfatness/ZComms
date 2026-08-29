@@ -43,6 +43,7 @@
 #include "engine.h"
 #include "frame_ring.h"
 #include "generator.h"
+#include "breakout.h"
 #include "roster.h"
 #include "signal.h"
 #include "talkback_channels.h"
@@ -387,6 +388,7 @@ int Run(int argc, char** argv) {
   std::string passcode_pending;
   std::mutex dev_m;
   std::string mic_pending, out_pending;  // device switches from settings
+  std::string room_pending;              // breakout-room move from settings
 
   // The operator's Zoom session. signed_in mirrors the token store so the
   // idle loop can gate the join card without a disk read per tick; --anon
@@ -439,6 +441,9 @@ int Run(int argc, char** argv) {
             gain_pending.store(true);
           } else if (verb == "tone") {
             tone_req.store(a1 == "on" ? 1 : 0);
+          } else if (verb == "room") {
+            std::lock_guard<std::mutex> lock(dev_m);
+            room_pending = arg;
           } else if (verb == "setmic") {
             // Device names carry spaces; the whole argument is the name.
             std::lock_guard<std::mutex> lock(dev_m);
@@ -703,6 +708,14 @@ int Run(int argc, char** argv) {
   Roster roster;
   roster.Attach(zoom.GetParticipantsController());
 
+  // Breakout awareness (delivery law #2): talkback does not cross rooms,
+  // so the desk tracks its own room and everyone else's, refuses what
+  // cannot deliver, and can move itself.
+  BreakoutRooms bo;
+  bo.Attach(zoom.GetBOController());
+  BreakoutState bo_state;
+  std::string prev_room = "\x01";  // impossible value forces the first log
+
   // --- Channel bring-up (host/co-host retry, as proven in the spike) --------
   const int n_channels =
       cfg.channels < 1 ? 1
@@ -881,6 +894,16 @@ int Run(int argc, char** argv) {
       next_house_ns = NowNs() + 2'000'000'000LL;
       zoom.AdmitAllWaiting();  // no-op unless we are host
 
+      // Room truth, refreshed with the housekeeping cadence.
+      bo_state = bo.Snapshot();
+      if (bo_state.my_room != prev_room) {
+        prev_room = bo_state.my_room;
+        if (bo_state.started || !bo_state.my_room.empty()) {
+          log_op("station room: " +
+                 (bo_state.my_room.empty() ? "MAIN" : bo_state.my_room));
+        }
+      }
+
       // Talkback only delivers while the meeting mic is open; a host mute
       // (or mute-all) silently kills every channel, so re-open and say so.
       if (zoom.SelfMuted()) {
@@ -968,7 +991,13 @@ int Run(int argc, char** argv) {
           const bool have =
               snap[static_cast<size_t>(s)].members.count(m.user_id) != 0;
           if (want && have) invite_backoff.erase({s, m.user_id});
-          if (want && !have && m.supports_talkback) {
+          // A cross-room invite fails WRONG_USAGE and a cross-room member
+          // hears nothing (delivery law #2) -- do not churn on it; the
+          // person becomes invitable again the moment rooms align.
+          const bool same_room =
+              !bo_state.started ||
+              BreakoutRooms::RoomOf(bo_state, m.name) == bo_state.my_room;
+          if (want && !have && m.supports_talkback && same_room) {
             const auto b = invite_backoff.find({s, m.user_id});
             if (b == invite_backoff.end() || NowNs() >= b->second.second) {
               missing.push_back(m.user_id);
@@ -1089,6 +1118,15 @@ int Run(int argc, char** argv) {
         const auto it = names.find(*ids.begin());
         return it == names.end() ? "" : it->second;
       };
+      // A person's room, relative to ours: "" when reachable (same room or
+      // no breakouts), the room's name -- or "MAIN" -- when talkback
+      // cannot reach them from here.
+      const auto room_of = [&](const std::string& name) -> std::string {
+        if (name.empty() || !bo_state.started) return "";
+        const std::string r = BreakoutRooms::RoomOf(bo_state, name);
+        if (r == bo_state.my_room) return "";
+        return r.empty() ? "MAIN" : r;
+      };
       std::string j = "{\"phase\":\"up\",";
       j += "\"meeting\":\"" + std::to_string(cfg.meeting_number) + "\",";
       j += "\"status\":\"" + status + "\",";
@@ -1099,6 +1137,19 @@ int Run(int argc, char** argv) {
       j += std::string("\"tone\":") +
            ((engine && engine->test_tone()) ? "true," : "false,");
       j += std::string("\"sdkmic\":") + (zoom.SelfMuted() ? "false," : "true,");
+      j += std::string("\"bostarted\":") + (bo_state.started ? "true," : "false,");
+      j += "\"boroom\":\"" + JsonEscape(bo_state.my_room) + "\",";
+      j += "\"rooms\":[";
+      {
+        bool rf = true;
+        for (const BreakoutRoomInfo& r : bo_state.rooms) {
+          if (!rf) j += ",";
+          rf = false;
+          j += "{\"id\":\"" + JsonEscape(r.id) + "\",\"name\":\"" +
+               JsonEscape(r.name) + "\"}";
+        }
+      }
+      j += "],";
       j += "\"gain\":" + std::to_string(static_cast<int>(gain_db)) + ",";
       char pk[32];
       std::snprintf(pk, sizeof(pk), "%.4f", peak);
@@ -1119,8 +1170,10 @@ int Run(int argc, char** argv) {
         const ChannelState& c = snap[static_cast<size_t>(s)];
         if (!first) j += ",";
         first = false;
+        const std::string lbl = channel_label(s);
         j += "{\"name\":\"" + JsonEscape(c.name) + "\",";
-        j += "\"label\":\"" + JsonEscape(channel_label(s)) + "\",";
+        j += "\"label\":\"" + JsonEscape(lbl) + "\",";
+        j += "\"room\":\"" + JsonEscape(room_of(lbl)) + "\",";
         j += std::string("\"ready\":") + (c.ready ? "true," : "false,");
         j += "\"listeners\":" + std::to_string(c.listeners) + ",";
         j += std::string("\"keyed\":") +
@@ -1134,6 +1187,7 @@ int Run(int argc, char** argv) {
         if (!first) j += ",";
         first = false;
         j += "{\"name\":\"" + JsonEscape(m.name) + "\",";
+        j += "\"room\":\"" + JsonEscape(room_of(m.name)) + "\",";
         j += "\"uid\":" + std::to_string(m.user_id) + ",";
         j += std::string("\"tb\":") + (m.supports_talkback ? "true," : "false,");
         j += "\"chans\":[";
@@ -1181,11 +1235,19 @@ int Run(int argc, char** argv) {
       }
       // Device switches from the settings drawer: restart the engine on the
       // new device. A short gap in the mic is inherent to changing it.
-      std::string want_mic, want_out;
+      std::string want_mic, want_out, want_room;
       {
         std::lock_guard<std::mutex> lock(dev_m);
         want_mic.swap(mic_pending);
         want_out.swap(out_pending);
+        want_room.swap(room_pending);
+      }
+      if (!want_room.empty()) {
+        std::string berr;
+        const bool ok = (want_room == "main") ? bo.ReturnToMain(&berr)
+                                              : bo.SwitchToRoom(want_room, &berr);
+        if (!ok) log_op("room move failed: " + berr);
+        // Success reports itself via the next snapshot's room-change log.
       }
       if ((!want_mic.empty() || !want_out.empty()) && engine) {
         if (!want_mic.empty()) cfg.mic_device = want_mic;
