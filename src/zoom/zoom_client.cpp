@@ -101,6 +101,10 @@ std::string MeetingFailReason(int code) {
       return "the host's account does not allow outside participants";
     case MEETING_FAIL_UNABLE_TO_JOIN_EXTERNAL_MEETING:
       return "this account is not allowed to join external meetings";
+    case ZoomClient::kFailAccountBusyElsewhere:
+      return "your Zoom account is in a meeting on another device -- ZComms "
+             "joins as you; leave that meeting first (or join one you are "
+             "not hosting)";
     default: return "code " + std::to_string(code);
   }
 }
@@ -508,8 +512,19 @@ void ZoomClient::onWebinarNeedRegisterNotification(
   std::printf("[sdk] this webinar requires registration -- cannot join\n");
 }
 void ZoomClient::onEndOtherMeetingToJoinMeetingNotification(
-    IEndOtherMeetingToJoinMeetingHandler*) {
-  std::printf("[sdk] SDK says another meeting is in progress\n");
+    IEndOtherMeetingToJoinMeetingHandler* handler) {
+  // ZComms joins AS the signed-in operator (ZAK), so if that account is
+  // already hosting a meeting elsewhere -- their own Zoom client in their
+  // PMI, live 2026-08-29 -- the SDK asks "end the other meeting to join?".
+  // Unanswered, the join hangs FOREVER, which read as "the app isn't
+  // responding". Never end the operator's own meeting out from under them:
+  // Cancel, fail the join, and say why. The status stores a code the Join
+  // wait turns into operator language.
+  std::printf("[sdk] this account is already in a meeting elsewhere -- "
+              "declining to end it; join cancelled\n");
+  if (handler != nullptr) handler->Cancel();
+  last_fail_code_.store(kFailAccountBusyElsewhere);
+  status_.store(MEETING_STATUS_FAILED);
 }
 void ZoomClient::onWebinarNeedInputScreenName(IWebinarInputScreenNameHandler*) {
   std::printf("[sdk] webinar wants a screen name prompt\n");
