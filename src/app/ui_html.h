@@ -74,7 +74,8 @@ h2{font:10px var(--mono);letter-spacing:.30em;color:var(--dim);font-weight:400;
 .mod{display:flex;flex-direction:column;align-items:center;gap:10px;
   background:var(--panel-key);border:1px solid var(--scribe);
   padding:16px;min-width:170px}
-.mod .plate b{font-size:14px}
+.mod .plate b{font-size:13px;display:block;max-width:170px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
 .mod .key{width:150px;padding:20px 0;font-size:15px}
 /* engraved plate */
 .plate{background:var(--rack);border:1px solid var(--scribe);
@@ -101,6 +102,9 @@ h2{font:10px var(--mono);letter-spacing:.30em;color:var(--dim);font-weight:400;
 .tog:focus-visible{outline:1px solid var(--amber);outline-offset:3px}
 .tog.on{background:#1B1810;border-color:var(--amber);color:var(--amber)}
 .hint{font:11px var(--mono);color:var(--dim);letter-spacing:.04em}
+.allrow{display:none;gap:12px;align-items:stretch;width:min(560px,92%)}
+.allrow.show{display:flex}
+.allrow .allkey{flex:1;width:auto;padding:18px 0}
 .row{display:flex;gap:12px}
 /* join / sign-in card */
 .joincard{display:none;flex-direction:column;align-items:center;gap:14px;
@@ -172,8 +176,12 @@ h2{font:10px var(--mono);letter-spacing:.30em;color:var(--dim);font-weight:400;
                autocomplete="off" spellcheck="false">
         <button class="tog on" id="joinbtn">CONNECT</button>
       </div>
+      <div class="allrow" id="allrow">
+        <button class="key allkey" id="allkey" aria-pressed="false">ALL CALL</button>
+        <button class="tog" id="alllatch">LATCH ALL</button>
+      </div>
       <div class="bank" id="bank"></div>
-      <div class="hint">hold a key · digits 1–9 per channel · space = all call · latch for hands-free</div>
+      <div class="hint">hold a key · digits 1–9 direct · space = all call · latch for hands-free</div>
       <div class="row">
         <button class="tog" id="side">SIDETONE</button>
         <button class="tog" id="aec">ECHO CANCEL</button>
@@ -240,7 +248,7 @@ function buildBank(n){
     latch.textContent='LATCH';
     latch.onclick=()=>act('latch',i+' '+(S.channels[i].latched?'off':'on'));
     mod.append(plate,key,latch);bank.appendChild(mod);
-    mods.push({sub,key,latch,setHeld});
+    mods.push({mod,nm,sub,key,latch,setHeld});
   }
 }
 /* digits 1..9 as per-channel PTT */
@@ -252,7 +260,19 @@ addEventListener('keyup',e=>{
   const d=e.code.startsWith('Digit')?+e.code.slice(5):0;
   if(d>=1&&d<=mods.length){e.preventDefault();mods[d-1].setHeld(false);}
 });
-addEventListener('blur',()=>mods.forEach(m=>m.setHeld(false)));
+addEventListener('blur',()=>{mods.forEach(m=>m.setHeld(false));allSet(false);});
+
+/* ALL CALL: hold to talk to the whole panel, over whatever else is keyed. */
+let allHeld=false;
+const allSet=v=>{if(allHeld===v)return;allHeld=v;act('talkall',v?'on':'off');};
+const allkey=$('allkey');
+allkey.addEventListener('pointerdown',e=>{allkey.setPointerCapture(e.pointerId);allSet(true);});
+allkey.addEventListener('pointerup',()=>allSet(false));
+allkey.addEventListener('pointercancel',()=>allSet(false));
+$('alllatch').onclick=()=>{
+  const chans=S.channels||[];
+  const allOn=chans.length&&chans.every(c=>c.latched);
+  act('latchall',allOn?'off':'on');};
 
 const needPass=()=>S.phase==='joining'&&/PASSCODE/.test(S.status||'');
 const joinNow=()=>{
@@ -278,6 +298,7 @@ function render(){
   $('joincard').classList.toggle('show',idle);
   $('bank').style.display=idle?'none':'flex';
   if(idle){
+    $('allrow').classList.remove('show');
     $('state').textContent=S.status||'—';
     $('joinstate').textContent=(S.phase==='joining')?(S.status||'connecting…')
                              :(S.phase==='signin')?'connect your Zoom account'
@@ -305,9 +326,23 @@ function render(){
   $('led-link').classList.toggle('on',S.status==='IN MEETING');
   $('led-ch').classList.toggle('on',anyReady);
   $('led-tx').classList.toggle('on',!!S.talking&&anyReady);
+  $('allrow').classList.add('show');
+  const allKeyed=chans.length&&chans.every(c=>c.keyed);
+  $('allkey').classList.toggle('hot',!!allKeyed);
+  $('allkey').setAttribute('aria-pressed',!!allKeyed);
+  $('alllatch').classList.toggle('on',chans.length&&chans.every(c=>c.latched));
   chans.forEach((c,i)=>{
     const m=mods[i];if(!m)return;
-    m.sub.textContent=c.ready?(c.listeners+' listening'):'forming…';
+    // A channel earns a key on the panel when someone is on it (or it is
+    // mid-use); empty spares stay off the desk. A one-person channel is a
+    // direct line and wears that person's name.
+    const active=c.listeners>0||c.label||c.keyed||c.latched;
+    m.mod.style.display=active?'':'none';
+    m.nm.textContent=c.label||('CH '+(i+1));
+    m.nm.title=c.label||'';
+    m.sub.textContent=c.ready?(c.label?('direct · ch '+(i+1))
+                                      :(c.listeners+' listening'))
+                             :'forming…';
     m.key.classList.toggle('hot',!!c.keyed);
     m.key.setAttribute('aria-pressed',!!c.keyed);
     m.latch.classList.toggle('on',!!c.latched);
@@ -326,11 +361,18 @@ function render(){
     const nm=document.createElement('span');nm.textContent=m.name;
     li.appendChild(nm);
     if(m.tb){
+      // Chips: the channels in use, plus one spare to start a new group --
+      // sixteen buttons per person would drown the roster.
+      const inUse=chans.map((c,i)=>i).filter(i=>{const c=chans[i];
+        return c.listeners>0||c.label||c.keyed||c.latched||(m.chans||[])[i];});
+      const spare=chans.findIndex((c,i)=>!inUse.includes(i));
+      const slots=spare>=0?[...inUse,spare]:inUse;
       const chips=document.createElement('span');chips.className='chips';
-      (m.chans||[]).forEach((on,i)=>{
+      slots.forEach(i=>{
+        const on=(m.chans||[])[i];
         const b=document.createElement('button');b.className='chip'+(on?' on':'');
         b.textContent=i+1;
-        b.title=(on?'Remove from':'Add to')+' CH '+(i+1);
+        b.title=(on?'Remove from':'Add to')+' '+(chans[i].label||('CH '+(i+1)));
         b.onclick=()=>act('assign',i+':'+m.uid+' '+(on?'off':'on'));
         chips.appendChild(b);
       });

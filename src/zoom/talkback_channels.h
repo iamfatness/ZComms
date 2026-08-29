@@ -56,6 +56,12 @@ class TalkbackChannels : public ZOOM_SDK_NAMESPACE::IMeetingTalkbackCtrlEvent {
 
   // Membership, by slot. Both asynchronous with response callbacks.
   bool Invite(int slot, unsigned int user_id, std::string* error);
+  // Everyone missing from a channel in ONE SDK exchange (BeginBatch/Add*N/
+  // Execute). Zoom rate-limits back-to-back talkback calls (code 18, hit
+  // live 2026-08-29 with a 12-person roster when the healer issued one
+  // invite call per person) -- the batch API exists for exactly this.
+  bool InviteMany(int slot, const std::vector<unsigned int>& user_ids,
+                  std::string* error);
   bool Remove(int slot, unsigned int user_id, std::string* error);
 
   // Keying. The mask is what SendToKeyed routes by; setting it is wait-free.
