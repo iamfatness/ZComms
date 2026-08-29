@@ -138,6 +138,18 @@ Verified before the live run:
 Run `--self-test` before believing any live figure; the live run has no ground
 truth by construction, so that is the only place the instrument gets checked.
 
+### The app outlives its meetings (2026-08-29)
+
+`Run()` is a session cycle: join card → meeting session (a lambda) → back to
+the join card on any failure or when the meeting ends; only QUIT / a scripted
+`--run-seconds` exits. Failures `log_op` into the panel's ops ticker instead
+of exiting — the live bug that forced this: InitSDK error 14 (OBS's
+ZoomObsEngine held the SDK) exited the process, which from the operator's
+chair looked like "pasted a link and it froze". `SdkConflictHint()` names the
+conflicting process by scanning for known SDK hosts. Per-meeting state
+(`intent`, `auto_assigned`, `warned_no_talkback`, housekeeping timer) is
+session-scoped, never static — user ids are meeting-scoped and recycled.
+
 ### Things that cost real time here, worth not rediscovering
 
 - **The SDK refuses to initialise if another process holds one.** `InitSDK`

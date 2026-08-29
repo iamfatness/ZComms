@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <timeapi.h>
+#include <tlhelp32.h>
 #include <conio.h>
 
 #include <atomic>
@@ -225,6 +226,38 @@ section 2): on open speakers your monitor feeds back into the channel.
 )");
 }
 
+// Names any other process on the machine known to embed the Zoom SDK. When
+// InitSDK fails with OTHER_SDK_INSTANCE_RUNNING (14), "close the other app"
+// is only actionable if we say WHICH app.
+std::string SdkConflictHint() {
+  const char* known[] = {"ZoomObsEngine.exe", "zcomms.exe", "ZoomISO.exe"};
+  std::set<std::string> seen;  // the engine can run as several processes
+  std::string found;
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap != INVALID_HANDLE_VALUE) {
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    const DWORD self = GetCurrentProcessId();
+    if (Process32FirstW(snap, &pe)) {
+      do {
+        if (pe.th32ProcessID == self) continue;
+        char name[MAX_PATH];
+        WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, name, sizeof(name),
+                            nullptr, nullptr);
+        for (const char* k : known) {
+          if (_stricmp(name, k) == 0 && seen.insert(k).second) {
+            if (!found.empty()) found += ", ";
+            found += name;
+          }
+        }
+      } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+  }
+  if (found.empty()) return "another app that embeds the Zoom SDK is running";
+  return "close " + found + " (it holds the Zoom SDK) and try again";
+}
+
 // Opens the panel as a standalone app window rather than a browser tab:
 // Edge/Chrome --app mode gives a chromeless window with its own taskbar
 // entry, which is the difference between "a tab I lose" and "the app".
@@ -405,6 +438,14 @@ int Run(int argc, char** argv) {
     ui->PublishState(j);
   };
 
+  // --- Session cycle --------------------------------------------------------
+  // The app outlives its meetings. Acquire one, run it, and on any outcome
+  // short of "quit" -- join failure, SDK conflict, meeting over -- come back
+  // here with the panel alive and the reason in the ops log. (Before this
+  // loop existed, failures exited the process, which from the operator's
+  // chair looked like the app froze and vanished: the live bug of 2026-08-29,
+  // InitSDK error 14 while OBS held the Zoom engine.)
+  for (;;) {
   // --- Acquire a meeting ----------------------------------------------------
   for (;;) {
     if (!meeting_arg.empty() &&
@@ -440,19 +481,23 @@ int Run(int argc, char** argv) {
   publish_phase("joining", "JOINING MEETING");
   std::printf("  USE A HEADSET or keep ECHO CANCEL on.\n\n");
 
+  // One meeting session, start to finish. Runs as a lambda so every failure
+  // is a return to the session cycle, never a process exit. Returns:
+  //   0  operator quit / scripted run elapsed -> exit the app
+  //   1  meeting ended normally              -> back to the join card
+  //  -1  bring-up failed                     -> back to the join card
+  const auto session = [&]() -> int {
   // --- Zoom bring-up --------------------------------------------------------
   ZoomClient zoom;
   std::string err;
   if (!zoom.Init(&err)) {
-    std::printf("ERROR: %s\n", err.c_str());
-    std::printf("  (if this is error 14: another app's Zoom engine is "
-                "running -- close it first)\n");
-    return 1;
+    log_op(err + " -- " + SdkConflictHint());
+    return -1;
   }
   if (!zoom.Authenticate(cfg.public_app_key, "", "", 30000, &err)) {
-    std::printf("ERROR: %s\n", err.c_str());
+    log_op("sign-in failed: " + err);
     zoom.Cleanup();
-    return 1;
+    return -1;
   }
   publish_phase("joining", "JOINING -- ADMIT \"" + cfg.display_name +
                                "\" IF A WAITING ROOM PROMPTS");
@@ -461,9 +506,9 @@ int Run(int argc, char** argv) {
               (unsigned long long)cfg.meeting_number, cfg.display_name.c_str());
   if (!zoom.Join(cfg.meeting_number, cfg.meeting_password, cfg.display_name,
                  600000, &err)) {
-    std::printf("ERROR: %s\n", err.c_str());
+    log_op("could not join: " + err);
     zoom.Cleanup();
-    return 1;
+    return -1;
   }
   std::printf("[zoom] in the meeting\n");
   if (!zoom.JoinVoip(&err)) {
@@ -481,10 +526,10 @@ int Run(int argc, char** argv) {
                               : cfg.channels);
   TalkbackChannels bank(zoom.GetTalkbackController());
   if (!bank.meeting_supports_talkback()) {
-    std::printf("ERROR: this meeting does not support talkback.\n");
+    log_op("this meeting does not support talkback");
     zoom.Leave();
     zoom.Cleanup();
-    return 1;
+    return -1;
   }
   bool created = false;
   for (int attempt = 0; attempt < 120 && !created; ++attempt) {
@@ -508,10 +553,10 @@ int Run(int argc, char** argv) {
     }
   }
   if (!created) {
-    std::printf("ERROR: could not create talkback channels.\n");
+    log_op("could not create talkback channels (never granted host/co-host?)");
     zoom.Leave();
     zoom.Cleanup();
-    return 1;
+    return -1;
   }
   bank.SetBackgroundVolumeAll(0.2f);  // duck, don't erase, the meeting
   std::printf("[zoom] %d channel(s) up\n", n_channels);
@@ -550,10 +595,10 @@ int Run(int argc, char** argv) {
     ecfg.aec = cfg.aec;
     engine = std::make_unique<AudioEngine>(ecfg, &sink);
     if (!engine->Start(&err)) {
-      std::printf("ERROR: %s\n", err.c_str());
+      log_op("audio engine failed: " + err);
       zoom.Leave();
       zoom.Cleanup();
-      return 1;
+      return -1;
     }
     std::printf("[audio] mic: %s\n", engine->capture_device_name().c_str());
     if (cfg.sidetone) {
@@ -574,6 +619,8 @@ int Run(int argc, char** argv) {
   // membership on the housekeeping cadence.
   std::set<std::pair<int, unsigned int>> intent;
   std::set<unsigned int> auto_assigned;
+  std::set<unsigned int> warned_no_talkback;
+  int64_t next_house_ns = 0;
   // All-call latch (SPACE latches every channel); per-channel latch mask.
   uint32_t latch_mask = cfg.start_latched ? 0xFFFFFFFFu : 0u;
   bool quit = false;
@@ -619,8 +666,8 @@ int Run(int argc, char** argv) {
     // inviting it fails with INVALID_PARAMETER); Zoom drops leavers on its
     // own, and a rejoin arrives as a brand-new user id (plan §5). Retried on
     // a timer rather than only on roster changes, so a transient failure
-    // heals instead of sticking.
-    static int64_t next_house_ns = 0;
+    // heals instead of sticking. (Session-scoped, not static: user ids are
+    // meeting-scoped and recycled, so state must die with the session.)
     roster.ConsumeDirty();
     if (NowNs() >= next_house_ns) {
       next_house_ns = NowNs() + 2'000'000'000LL;
@@ -629,8 +676,7 @@ int Run(int argc, char** argv) {
       // Default policy: a new capable participant lands on CH 1.
       for (const RosterMember& m : roster.others()) {
         if (!m.supports_talkback) {
-          static std::set<unsigned int> warned;
-          if (warned.insert(m.user_id).second) {
+          if (warned_no_talkback.insert(m.user_id).second) {
             log_op(m.name + " cannot receive talkback (web client) -- skipped");
           }
           continue;
@@ -836,6 +882,10 @@ int Run(int argc, char** argv) {
   }
 
   // --- Teardown -------------------------------------------------------------
+  // Decide the outcome before tearing down: quit (or a scripted run elapsing)
+  // exits the app; the meeting ending underneath us goes back to the join
+  // card with the panel still alive.
+  const bool app_exit = quit || (end_ns != 0 && NowNs() >= end_ns);
   watchdog_running.store(false);
   if (watchdog.joinable()) watchdog.join();
   std::printf("\n[zoom] leaving...\n");
@@ -848,7 +898,18 @@ int Run(int argc, char** argv) {
   if (test_gen_src) test_gen_src->Stop();
   zoom.Leave();
   zoom.Cleanup();
-  return 0;
+  return app_exit ? 0 : 1;
+  };  // end of session lambda
+
+  const int session_rc = session();
+  if (!ui) return session_rc < 0 ? 1 : 0;  // headless runs one session
+  if (session_rc == 0) return 0;           // operator quit / run elapsed
+  if (session_rc > 0) log_op("meeting ended");
+  // Back to the join card for the next meeting.
+  meeting_arg.clear();
+  cfg.meeting_number = 0;
+  cfg.meeting_password.clear();
+  }  // session cycle
 }
 
 }  // namespace
