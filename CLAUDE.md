@@ -159,9 +159,14 @@ found live and each now enforced or surfaced:
    sends count, zero failures, members confirmed -- and every member hears
    silence. Unmuting makes the same channel audible (owner-found).
    Enforced: `UnmuteSelf` after JoinVoip + housekeeping re-open every 2s +
-   the panel's MTG MIC lamp. OPEN QUESTION: does the meeting hear the
-   SDK's captured mic device while idle-unmuted? If yes, the SDK-side mic
-   needs pointing at a dead input (ISettingService follow-up).
+   the panel's MTG MIC lamp. The open-mic hazard is closed by
+   **auto-suppress** (the ZoomISO pattern, confirmed by Zoom via the
+   owner's contact): a never-fed SDK virtual mic (setExternalAudioSource,
+   in-process API, NO driver) = open but silent to the room.
+   **Live-verified 2026-08-29 16:12: works under the broker-JWT auth** --
+   so that tier DOES carry the raw-data entitlement (bare public-app-key
+   did not; HasRawdataLicense was false there). Fallback when absent is a
+   loud ops line; the operator points Zoom at a dead input.
 2. **Talkback does not cross breakout rooms** (CoreVideo found it the same
    morning in the same production meeting, same person: invites refused
    `WRONG_USAGE` cross-room; and a member who IS in the channel but in
