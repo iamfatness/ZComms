@@ -677,6 +677,13 @@ int Run(int argc, char** argv) {
   if (!zoom.JoinVoip(&err)) {
     std::printf("WARNING: %s\n", err.c_str());
   }
+  // Talkback DELIVERY requires this client's meeting audio to be OPEN --
+  // owner-found live 2026-08-29: joined muted (mute-on-entry), every send
+  // was accepted and every member heard silence; unmuting made the same
+  // channel audible. Open it now and keep it open (housekeeping re-opens).
+  if (!zoom.UnmuteSelf(&err)) {
+    std::printf("WARNING: could not open meeting audio: %s\n", err.c_str());
+  }
 
   Roster roster;
   roster.Attach(zoom.GetParticipantsController());
@@ -858,6 +865,18 @@ int Run(int argc, char** argv) {
     if (NowNs() >= next_house_ns) {
       next_house_ns = NowNs() + 2'000'000'000LL;
       zoom.AdmitAllWaiting();  // no-op unless we are host
+
+      // Talkback only delivers while the meeting mic is open; a host mute
+      // (or mute-all) silently kills every channel, so re-open and say so.
+      if (zoom.SelfMuted()) {
+        std::string uerr;
+        if (zoom.UnmuteSelf(&uerr)) {
+          log_op("meeting mic re-opened -- talkback delivery needs it");
+        } else {
+          log_op("meeting mic is MUTED (talkback is dead until it opens): " +
+                 uerr);
+        }
+      }
 
       // Prune intent for people no longer here: user ids are meeting-scoped
       // and recycled (plan §5) -- a stale id must not keep a channel
@@ -1064,6 +1083,7 @@ int Run(int argc, char** argv) {
            ((engine && engine->aec_enabled()) ? "true," : "false,");
       j += std::string("\"tone\":") +
            ((engine && engine->test_tone()) ? "true," : "false,");
+      j += std::string("\"sdkmic\":") + (zoom.SelfMuted() ? "false," : "true,");
       j += "\"gain\":" + std::to_string(static_cast<int>(gain_db)) + ",";
       char pk[32];
       std::snprintf(pk, sizeof(pk), "%.4f", peak);

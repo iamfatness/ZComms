@@ -88,6 +88,11 @@ class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
   // implement, so it unmutes itself.
   bool UnmuteSelf(std::string* error);
 
+  // Whether this client's meeting audio is muted. Talkback DELIVERY only
+  // happens while it is open (owner-found live, 2026-08-29: muted = sends
+  // accepted by the SDK, silence at every member).
+  bool SelfMuted();
+
   // Logs this client's audio connection and mute state, so "the send window
   // never opened" comes with the reason attached instead of being a mystery.
   void LogSelfAudioState(const char* tag);

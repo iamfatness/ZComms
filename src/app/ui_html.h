@@ -160,6 +160,7 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
       <div class="meet" id="meet">—</div>
       <div class="leds">
         <div class="led g" id="led-link"><i></i>LINK</div>
+        <div class="led g" id="led-mic"><i></i>MTG MIC</div>
         <div class="led a" id="led-ch"><i></i>CHANNEL</div>
         <div class="led r" id="led-tx"><i></i>TX</div>
       </div>
@@ -377,13 +378,14 @@ function render(){
                                  :'https://zoom.us/j/…  or meeting ID';
     $('joinbtn').textContent=signin?'SIGN IN':(pass?'SUBMIT':'CONNECT');
     $('meet').textContent=S.status||'—';
-    ['led-link','led-ch','led-tx'].forEach(i=>$(i).classList.remove('on'));
+    ['led-link','led-mic','led-ch','led-tx'].forEach(i=>$(i).classList.remove('on'));
     return;
   }
   $('meet').textContent='MTG '+(S.meeting||'—')+' · '+(S.status||'');
   const anyReady=chans.some(c=>c.ready);
   const anyHearing=chans.some(c=>c.keyed&&c.listeners>0);
   $('led-link').classList.toggle('on',S.status==='IN MEETING');
+  $('led-mic').classList.toggle('on',!!S.sdkmic);
   $('led-ch').classList.toggle('on',anyReady);
   $('led-tx').classList.toggle('on',!!S.talking&&anyHearing);
   const allKeyed=chans.length&&chans.every(c=>c.keyed);

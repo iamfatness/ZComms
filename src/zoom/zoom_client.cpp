@@ -345,6 +345,14 @@ bool ZoomClient::LeaveVoip(std::string* error) {
   return true;
 }
 
+bool ZoomClient::SelfMuted() {
+  if (meeting_ == nullptr) return false;
+  IMeetingParticipantsController* parts =
+      meeting_->GetMeetingParticipantsController();
+  IUserInfo* self = parts != nullptr ? parts->GetMySelfUser() : nullptr;
+  return self != nullptr && self->IsAudioMuted();
+}
+
 bool ZoomClient::UnmuteSelf(std::string* error) {
   if (meeting_ == nullptr) {
     *error = "no meeting service";
