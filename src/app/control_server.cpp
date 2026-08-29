@@ -156,6 +156,34 @@ void ControlServer::ServeClient(uintptr_t socket) {
     const std::string arg = sp == std::string::npos ? "" : body.substr(sp + 1);
     if (on_action_ && !verb.empty()) on_action_(verb, arg);
     SendAll(s, "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+  } else if (req.rfind("GET /oauth/callback", 0) == 0) {
+    // The sign-in return leg. Query string ends at the first space of the
+    // request line ("GET /oauth/callback?a=b HTTP/1.1").
+    std::string query;
+    const size_t q = req.find('?');
+    const size_t sp = req.find(' ', 4);
+    if (q != std::string::npos && sp != std::string::npos && q < sp) {
+      query = req.substr(q + 1, sp - q - 1);
+    }
+    const std::string verdict = on_oauth_ ? on_oauth_(query) : "no handler";
+    const bool ok = verdict.empty();
+    std::string page =
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<title>ZComms</title><style>body{font-family:system-ui;"
+        "background:#1b1d21;color:#e8e4da;display:grid;place-items:center;"
+        "min-height:100vh;margin:0}main{text-align:center}p{color:#8f948e}"
+        "</style></head><body><main><h1>" +
+        std::string(ok ? "Signed in" : "Sign-in failed") + "</h1><p>" +
+        (ok ? "You can close this tab and return to the ZComms panel."
+            : verdict) +
+        "</p></main></body></html>";
+    char hdr[160];
+    std::snprintf(hdr, sizeof(hdr),
+                  "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                  "Content-Length: %zu\r\nConnection: close\r\n\r\n",
+                  page.size());
+    SendAll(s, hdr, std::strlen(hdr));
+    SendAll(s, page);
   } else if (req.rfind("GET / ", 0) == 0 || req.rfind("GET / HTTP", 0) == 0) {
     char hdr[160];
     std::snprintf(hdr, sizeof(hdr),

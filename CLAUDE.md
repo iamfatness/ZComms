@@ -149,6 +149,25 @@ the exe); if the download or the runtime is absent the app falls back to the
 old Edge/Chrome `--app` window. This is also the Mac-port shape: same panel
 HTML, WKWebView shell.
 
+### Signed-in joins: the CoreVideo auth pattern (2026-08-29)
+
+Owner rule: **no anonymous joins** -- ZComms follows CoreVideo's auth shape.
+`src/app/zoom_oauth.{h,cpp}` drives the CoreVideo OAuth broker
+(`corevideo.iamfatness.us`, the CF Worker in the CoreVideo repo's
+`site-worker.js`): browser -> `/oauth/start?state&return_uri` -> Zoom consent
+-> broker -> **loopback callback** `http://127.0.0.1:7350/oauth/callback`
+(served by ControlServer; RFC 8252 -- no protocol registration, unlike the
+OBS plugin's `corevideo://`+helper-exe shape) -> `/oauth/redeem` ->
+access/refresh tokens (DPAPI at rest, `%APPDATA%\ZComms\zoom-tokens.bin`).
+Joins then use `/oauth/sdk-jwt` for `AuthenticateWithJwt` + the Zoom API ZAK
+(`/v2/users/me/token?type=zak`) on `JoinParam.userZAK`. The broker's
+return-uri allowlist gained the loopback form in CoreVideo PR #233 (deployed;
+additive). Refresh tokens rotate and revoke -- `invalid_grant` clears the
+store and re-asks, never retries. Panel: `signin` phase = the join card as a
+SIGN IN card; verbs `signin`/`signout`. `--anon` keeps the old public-app-key
+guest join for scripted same-account runs (headless without a session errors
+loudly -- sign-in needs the panel's callback server).
+
 ### The app identity's join boundary (2026-08-29, live-diagnosed)
 
 **Under the PKCE public-app-key identity, ZComms can only guest-join meetings

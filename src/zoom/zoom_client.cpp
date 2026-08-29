@@ -142,6 +142,38 @@ bool ZoomClient::Init(std::string* error) {
   return true;
 }
 
+bool ZoomClient::AuthenticateWithJwt(const std::string& jwt, int timeout_ms,
+                                     std::string* error) {
+  if (CreateAuthService(&auth_) != SDKERR_SUCCESS || auth_ == nullptr) {
+    *error = "CreateAuthService failed";
+    return false;
+  }
+  auth_->SetEvent(this);
+
+  AuthContext ctx;
+  const std::wstring jwt_w = Widen(jwt);
+  ctx.jwt_token = jwt_w.c_str();
+  std::printf("[sdk] authenticating with a broker-minted SDK JWT\n");
+
+  const SDKError err = auth_->SDKAuth(ctx);
+  if (err != SDKERR_SUCCESS) {
+    *error = "SDKAuth call failed: " + std::to_string(static_cast<int>(err));
+    return false;
+  }
+  const int64_t deadline = NowNs() + static_cast<int64_t>(timeout_ms) * 1'000'000;
+  while (!auth_returned_.load() && NowNs() < deadline) Pump(50);
+  if (!auth_returned_.load()) {
+    *error = "authentication timed out after " + std::to_string(timeout_ms) + " ms";
+    return false;
+  }
+  const AuthResult result = static_cast<AuthResult>(auth_result_.load());
+  if (result != AUTHRET_SUCCESS) {
+    *error = std::string("authentication failed: ") + AuthResultName(result);
+    return false;
+  }
+  return true;
+}
+
 bool ZoomClient::Authenticate(const std::string& public_app_key,
                               const std::string& sdk_key,
                               const std::string& sdk_secret, int timeout_ms,
@@ -197,7 +229,8 @@ bool ZoomClient::Authenticate(const std::string& public_app_key,
 
 bool ZoomClient::Join(uint64_t meeting_number, const std::string& password,
                       const std::string& display_name, int timeout_ms,
-                      std::string* error, const std::function<void()>& on_tick) {
+                      std::string* error, const std::function<void()>& on_tick,
+                      const std::string& zak) {
   if (CreateMeetingService(&meeting_) != SDKERR_SUCCESS || meeting_ == nullptr) {
     *error = "CreateMeetingService failed";
     return false;
@@ -216,6 +249,7 @@ bool ZoomClient::Join(uint64_t meeting_number, const std::string& password,
 
   const std::wstring name_w = Widen(display_name);
   const std::wstring pw_w = Widen(password);
+  const std::wstring zak_w = Widen(zak);
 
   JoinParam jp;
   jp.userType = SDK_UT_WITHOUT_LOGIN;
@@ -223,6 +257,7 @@ bool ZoomClient::Join(uint64_t meeting_number, const std::string& password,
   p.meetingNumber = meeting_number;
   p.userName = name_w.c_str();
   p.psw = pw_w.c_str();
+  if (!zak_w.empty()) p.userZAK = zak_w.c_str();
   p.isVideoOff = true;
   // Audio explicitly ON: the whole point is a virtual mic on the meeting's
   // audio, and joining with audio off would install a mic onto nothing.

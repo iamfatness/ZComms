@@ -46,12 +46,21 @@ class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
                     const std::string& sdk_secret, int timeout_ms,
                     std::string* error);
 
+  // Auth with a ready-made Meeting SDK JWT (the broker mints it from the
+  // operator's OAuth session). This is the signed-in path -- paired with a
+  // ZAK on Join, the client is the operator's account, not an anonymous
+  // guest, which is what lifts the cross-account join refusal (fail 504).
+  bool AuthenticateWithJwt(const std::string& jwt, int timeout_ms,
+                           std::string* error);
+
   // on_tick (optional) runs every pump iteration of the join wait, so the
   // caller can surface progress -- and, when the meeting demands a passcode
   // the operator didn't provide, collect one -- without owning the loop.
+  // zak, when non-empty, joins as the signed-in user (JoinParam userZAK).
   bool Join(uint64_t meeting_number, const std::string& password,
             const std::string& display_name, int timeout_ms, std::string* error,
-            const std::function<void()>& on_tick = nullptr);
+            const std::function<void()>& on_tick = nullptr,
+            const std::string& zak = std::string());
 
   // Passcode conversation, driven by onInputMeetingPasswordAndScreenName-
   // Notification. A bare meeting ID on a passcode-protected meeting used to

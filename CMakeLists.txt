@@ -142,8 +142,9 @@ endif()
 # ---------------------------------------------------------------------------
 if(ZCOMMS_HAVE_SDK)
   add_executable(zcomms src/app/main.cpp src/app/control_server.cpp
-                        src/app/version.rc)
-  target_link_libraries(zcomms PRIVATE zcomms_zoom winmm ws2_32 shell32)
+                        src/app/zoom_oauth.cpp src/app/version.rc)
+  target_link_libraries(zcomms PRIVATE zcomms_zoom winmm ws2_32 shell32
+                        winhttp crypt32 bcrypt)
   if(ZCOMMS_HAVE_WEBVIEW2)
     target_sources(zcomms PRIVATE src/app/shell_window.cpp)
     target_include_directories(zcomms PRIVATE
