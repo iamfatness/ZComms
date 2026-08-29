@@ -61,3 +61,4 @@ void TestLimiter();
 void TestFrameAccumulator();
 void TestSampleRing();
 void TestFrameRing();
+void TestAec();

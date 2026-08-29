@@ -154,6 +154,7 @@ h2{font-size:10px;letter-spacing:.3em;color:var(--silk);font-weight:500;
       <div class="hint">HOLD A KEY (OR DIGIT) · SPACE = ALL CALL · LATCH FOR HANDS-FREE</div>
       <div class="row">
         <button class="tog" id="side">SIDETONE</button>
+        <button class="tog" id="aec">ECHO CANCEL</button>
       </div>
     </section>
     <section aria-label="monitor">
@@ -227,6 +228,7 @@ addEventListener('keyup',e=>{
 addEventListener('blur',()=>mods.forEach(m=>m.setHeld(false)));
 
 $('side').onclick=()=>act('sidetone',(S.sidetone?'off':'on'));
+$('aec').onclick=()=>act('aec',(S.aec?'off':'on'));
 $('g-dn').onclick=()=>act('gain',(S.gain-1));
 $('g-up').onclick=()=>act('gain',(S.gain+1));
 
@@ -251,6 +253,7 @@ function render(){
     m.latch.classList.toggle('on',!!c.latched);
   });
   $('side').classList.toggle('on',!!S.sidetone);
+  $('aec').classList.toggle('on',!!S.aec);
   $('g-val').textContent=(S.gain>0?'+':'')+S.gain+' dB';
   $('s-send').textContent=S.sends;
   $('s-under').textContent=S.underruns;

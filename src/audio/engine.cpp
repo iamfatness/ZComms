@@ -31,6 +31,10 @@ AudioEngine::AudioEngine(const EngineConfig& cfg, FrameSink* sink)
 AudioEngine::~AudioEngine() { Stop(); }
 
 bool AudioEngine::Start(std::string* error) {
+  if (cfg_.aec) {
+    aec_ = std::make_unique<EchoCanceller>(kSampleRate, kFrameSamples,
+                                           cfg_.aec_tail_ms);
+  }
   if (!capture_.Start(cfg_.capture_device,
                       [this](const float* mono, int frames) {
                         OnCapture(mono, frames);
@@ -82,6 +86,12 @@ void AudioEngine::SetInputGainDb(double db) { gain_.set_db(db); }
 void AudioEngine::SetSidetoneDb(double db) { sidetone_gain_.set_db(db); }
 void AudioEngine::SetSidetoneEnabled(bool on) { sidetone_on_.store(on); }
 
+void AudioEngine::SetAecEnabled(bool on) {
+  if (aec_) aec_->SetEnabled(on);
+}
+
+bool AudioEngine::aec_enabled() const { return aec_ && aec_->enabled(); }
+
 const std::string& AudioEngine::capture_device_name() const {
   return capture_.device_name();
 }
@@ -91,45 +101,49 @@ const std::string& AudioEngine::monitor_device_name() const {
 
 void AudioEngine::OnCapture(const float* mono, int frames) {
   if (frames <= 0) return;
-  if (scratch_.size() < static_cast<size_t>(frames)) {
-    scratch_.resize(static_cast<size_t>(frames));
-  }
-  std::copy(mono, mono + frames, scratch_.begin());
-  float* buf = scratch_.data();
+  // Raw capture is chunked to exact 20 ms frames FIRST and everything runs
+  // per-frame: the echo canceller demands fixed frames, and every other
+  // stage is indifferent to block size, so the frame is the one shape.
+  accum_.Push(mono, frames, [this](const float* frame, uint64_t start_sample) {
+    if (scratch_.size() < static_cast<size_t>(kFrameSamples)) {
+      scratch_.resize(static_cast<size_t>(kFrameSamples));
+    }
+    float* buf = scratch_.data();
+    std::copy(frame, frame + kFrameSamples, buf);
 
-  gain_.Process(buf, frames);
-  limiter_.Process(buf, frames);
+    // Echo cancellation before anything else touches the signal. The
+    // canceller models microphone-input against monitor-output; gain or
+    // limiting applied first would look like a time-varying acoustic path
+    // it has to keep chasing.
+    if (aec_) aec_->ProcessCapture(buf);
 
-  // Peak before the PTT envelope, so a level meter still moves when the
-  // operator is not talking. A meter that only works while transmitting is
-  // useless for setting gain.
-  double peak = capture_peak_.load();
-  for (int i = 0; i < frames; ++i) {
-    peak = std::max(peak, std::fabs(static_cast<double>(buf[i])));
-  }
-  peak *= 0.995;  // slow decay so the display falls back rather than sticking
-  capture_peak_.store(peak);
+    gain_.Process(buf, kFrameSamples);
+    limiter_.Process(buf, kFrameSamples);
 
-  ptt_.Process(buf, frames);
+    // Peak before the PTT envelope, so a level meter still moves when the
+    // operator is not talking. A meter that only works while transmitting
+    // is useless for setting gain.
+    double peak = capture_peak_.load();
+    for (int i = 0; i < kFrameSamples; ++i) {
+      peak = std::max(peak, std::fabs(static_cast<double>(buf[i])));
+    }
+    peak *= 0.995;  // slow decay so the display falls back, not sticks
+    capture_peak_.store(peak);
 
-  // Sidetone is tapped here, after the envelope, so it is a confidence
-  // monitor of what is actually leaving rather than of what the microphone
-  // heard. An operator who is not transmitting hears nothing, which is the
-  // correct and unambiguous signal that they are not transmitting.
-  //
-  // Only when something is actually consuming it. Writing into a ring with no
-  // reader drops every sample by design, and the resulting drop counter --
-  // one per sample, millions of them -- looks like a serious fault when it
-  // only means the monitor is off.
-  if (cfg_.monitor_enabled && sidetone_on_.load()) {
-    sidetone_.Write(buf, static_cast<size_t>(frames));
-  }
+    ptt_.Process(buf, kFrameSamples);
 
-  accum_.Push(buf, frames, [this](const float* frame, uint64_t start_sample) {
+    // Sidetone is tapped here, after the envelope, so it is a confidence
+    // monitor of what is actually leaving rather than of what the
+    // microphone heard -- and only when something is consuming it (see the
+    // sidetone drop-counter note in git history).
+    if (cfg_.monitor_enabled && sidetone_on_.load()) {
+      sidetone_.Write(buf, static_cast<size_t>(kFrameSamples));
+    }
+
     TxFrame f;
     f.seq = start_sample / static_cast<uint64_t>(kFrameSamples);
     for (int i = 0; i < kFrameSamples; ++i) {
-      const float v = std::max(-1.0f, std::min(1.0f, frame[i]));
+      const float v = std::max(-1.0f, std::min(1.0f, buf[i]));
       f.pcm[i] = static_cast<int16_t>(std::lrintf(v * 32767.0f));
     }
     ring_.Push(f);
@@ -141,6 +155,10 @@ void AudioEngine::OnMonitor(float* out, int frames) {
   if (frames <= 0) return;
   sidetone_.Read(out, static_cast<size_t>(frames));
   sidetone_gain_.Process(out, frames);
+  // The far-end reference: exactly what is about to leave the speakers,
+  // post-fader -- the canceller must model the path from what was actually
+  // played, not a pre-gain copy.
+  if (aec_) aec_->FeedPlayback(out, frames);
 }
 
 EngineStats AudioEngine::stats() const {
