@@ -62,27 +62,30 @@ Operational truths that run established, beyond Spike A's list:
   700/1000 Hz beep pattern through the same ring/pacer as live audio;
   `zcomms-tap` finds it. This pair is the repeatable e2e test.
 
-### Multi-channel status and open defects (2026-08-28)
+### Multi-channel: ROUTING PRIVACY VERIFIED LIVE (2026-08-29)
 
-Two channels ran live (created in one batch call, membership healing and
-panel routing chips working; a host-role handoff mid-bring-up was absorbed by
-the retry loop). **The two-channel privacy verification is NOT yet
-conclusive** — do not claim channel isolation is proven. Two blockers, both
-actionable:
+The intercom's core claim proven against a real meeting with the
+matched-filter e2e: with a native listener confirmed on CH 1 —
+
+- **CH 1 keyed** → probe detected at the listener: 7/8 bursts, correlation
+  peak **0.978**, PSR 5.8.
+- **CH 2 keyed only** (8 s of audio transmitted into it throughout) → the
+  CH 1 listener heard **nothing**: 0 bursts, peak 0.270 / PSR 1.2 = floor.
+
+Same transmitter, listener, bus; only the key differed. Channel isolation is
+real. Re-run any time: bring up `zcomms --channels 2 --test-signal`, then
+`POST /act "talk <slot> on|off"` + `zcomms-tap` per phase — no silence
+needed since the chirp/matched-filter rework.
+
+Open defects (2026-08-28), still standing:
 
 - **zcomms main-thread hang (AppHangB1), one occurrence.** ~40 s after a
   phase that sent 8 s of audio into an **empty** channel, the main loop
-  stopped pumping and Windows killed the process. Not reproduced yet; suspect
-  the empty-channel `SendAudioDataToChannel` path (the CoreVideo talkback
-  work also hit SDK defects in this area). Instrument before trusting long
-  unattended runs.
-- **zcomms-tap's Goertzel gate fails in real environments.** Any broadband
-  audio on the tapped bus (a livestream; a client joined with "original
-  sound" streaming raw room noise) raises the off-band floor and defeats the
-  20× ratio. The fix is known and cheap: make `--test-signal` emit the Spike
-  A chirp bursts and give the tap the spike's matched-filter/PSR detector —
-  chirps decorrelate from music, and the up/down alternation is unambiguous.
-  Then the e2e needs no silence at all.
+  stopped pumping and Windows killed the process. Not reproduced (2026-08-29's
+  phase B also sent into an empty-of-listeners keyed channel without
+  incident). Instrument before trusting long unattended runs.
+- ~~zcomms-tap Goertzel fragility~~ — fixed 2026-08-28: chirp probe +
+  matched-filter/PSR detection; field-proven both directions on a noisy bus.
 
 Also observed: a dead web session can linger as a **ghost participant
 holding host** for ~1–2 min; it can even kick joiners. Wait it out — host
