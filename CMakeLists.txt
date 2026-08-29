@@ -94,6 +94,7 @@ if(EXISTS "${ZOOM_SDK_DIR}/lib/sdk.lib")
     src/zoom/talkback_source.cpp
     src/zoom/talkback_channels.cpp
     src/zoom/roster.cpp
+    src/zoom/breakout.cpp
     src/zoom/jwt.cpp
   )
   target_link_libraries(zcomms_zoom PUBLIC zcomms_audio "${ZOOM_SDK_DIR}/lib/sdk.lib")

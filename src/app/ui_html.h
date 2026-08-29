@@ -183,6 +183,8 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
       <select id="micsel"></select></div>
     <div class="field"><label>sidetone output</label>
       <select id="outsel"></select></div>
+    <div class="field" id="roomfield" style="display:none"><label>station room</label>
+      <select id="roomsel"></select></div>
     <div class="field"><label>processing</label>
       <div class="row">
         <button class="tog" id="side">SIDETONE</button>
@@ -256,8 +258,9 @@ function buildGrid(rows){
       let held=false;
       const setHeld=v=>{if(held===v)return;held=v;act('talk',r.slot+' '+(v?'on':'off'));};
       b.addEventListener('pointerdown',e=>{
-        if(latchMode){const c=(S.channels||[])[r.slot]||{};
-          act('latch',r.slot+' '+(c.latched?'off':'on'));return;}
+        const c=(S.channels||[])[r.slot]||{};
+        if(c.room)return;  // fail closed: talkback cannot cross rooms
+        if(latchMode){act('latch',r.slot+' '+(c.latched?'off':'on'));return;}
         b.setPointerCapture(e.pointerId);setHeld(true);});
       b.addEventListener('pointerup',()=>setHeld(false));
       b.addEventListener('pointercancel',()=>setHeld(false));
@@ -274,6 +277,14 @@ function updateGrid(){
   cells.forEach(c=>{
     if(c.row.off){c.st.textContent='no talkback';return;}
     const ch=(S.channels||[])[c.row.slot]||{};
+    if(ch.room){
+      // Cross-room: unreachable from here, and the cell says where they are.
+      c.el.classList.add('off');
+      c.el.classList.remove('hot','armed','ready');
+      c.st.textContent='in '+ch.room;
+      return;
+    }
+    c.el.classList.remove('off');
     const hearing=ch.listeners>0;
     c.el.classList.toggle('hot',!!ch.keyed&&hearing);
     c.el.classList.toggle('armed',(!!ch.keyed&&!hearing)||(!ch.keyed&&!!ch.latched===false&&false));
@@ -337,7 +348,7 @@ function fillSel(sel,list,current,sig,verb){
   sel.onchange=()=>act(verb,sel.value);
   sig.v=s;return sig;
 }
-const micsig={v:''},outsig={v:''};
+const micsig={v:''},outsig={v:''},roomsig={v:''};
 
 /* join / sign-in */
 const needPass=()=>S.phase==='joining'&&/PASSCODE/.test(S.status||'');
@@ -381,7 +392,8 @@ function render(){
     ['led-link','led-mic','led-ch','led-tx'].forEach(i=>$(i).classList.remove('on'));
     return;
   }
-  $('meet').textContent='MTG '+(S.meeting||'—')+' · '+(S.status||'');
+  $('meet').textContent='MTG '+(S.meeting||'—')+' · '+(S.status||'')
+    +(S.bostarted?(' · ROOM '+(S.boroom||'MAIN')):'');
   const anyReady=chans.some(c=>c.ready);
   const anyHearing=chans.some(c=>c.keyed&&c.listeners>0);
   $('led-link').classList.toggle('on',S.status==='IN MEETING');
@@ -401,7 +413,8 @@ function render(){
     (S.roster||[]).forEach(m=>{
       const li=document.createElement('li');
       li.className=m.tb?'tb':'no';
-      const nm=document.createElement('span');nm.textContent=m.name;
+      const nm=document.createElement('span');
+      nm.textContent=m.name+(m.room?('  · in '+m.room):'');
       li.appendChild(nm);
       if(m.tb){
         const mine=chans.map((c,i)=>i).filter(i=>(m.chans||[])[i]);
@@ -432,6 +445,20 @@ function render(){
   $('g-val').textContent=(S.gain>0?'+':'')+S.gain+' dB';
   fillSel($('micsel'),S.mics,S.mic,micsig,'setmic');
   fillSel($('outsel'),S.outs,S.out,outsig,'setout');
+  /* station room: MAIN + every breakout, applied via the room verb */
+  $('roomfield').style.display=S.bostarted?'':'none';
+  if(S.bostarted){
+    const rs=$('roomsel');
+    const sig=(S.rooms||[]).map(r=>r.id).join('|')+'@'+(S.boroom||'');
+    if(sig!==roomsig.v){
+      roomsig.v=sig;rs.innerHTML='';
+      const mk=(v,label,sel)=>{const o=document.createElement('option');
+        o.value=v;o.textContent=label;o.selected=sel;rs.appendChild(o);};
+      mk('main','MAIN',!(S.boroom));
+      (S.rooms||[]).forEach(r=>mk(r.id,r.name,r.name===S.boroom));
+      rs.onchange=()=>act('room',rs.value);
+    }
+  }
   $('s-send').textContent=S.sends;
   $('s-chsend').textContent=S.chsends||0;
   $('s-under').textContent=S.underruns;

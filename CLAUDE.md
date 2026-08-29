@@ -170,8 +170,13 @@ found live and each now enforced or surfaced:
 2. **Talkback does not cross breakout rooms** (CoreVideo found it the same
    morning in the same production meeting, same person: invites refused
    `WRONG_USAGE` cross-room; and a member who IS in the channel but in
-   another room hears nothing). ZComms is not breakout-aware yet -- cells
-   should say `other room` instead of ready (TODO).
+   another room hears nothing). ZComms is breakout-aware
+   (`src/zoom/breakout.{h,cpp}`): the healer skips cross-room invites,
+   cross-room cells go dark with `in <room>` and refuse the press, the
+   rail shows the station's room, and settings has a STATION ROOM picker
+   (assistant rights = free movement; attendee = assigned room only). BO
+   user ids are their own GUIDs -- the NAME is the only join to the
+   roster. NOT live-verified yet (needs a breakout production).
 3. **A same-account host collision hangs the join unless answered**: the
    operator's own Zoom client hosting a meeting + ZComms ZAK-joining as
    the same account fires `onEndOtherMeetingToJoinMeetingNotification`;
