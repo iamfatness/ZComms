@@ -767,6 +767,7 @@ int Run(int argc, char** argv) {
   // housekeeping pass turns one code-18 into a permanent wall of them.
   std::map<std::pair<int, unsigned int>, std::pair<int, int64_t>>
       invite_backoff;
+  int heal_rr = 0;  // round-robin start slot for the one-call-per-pass healer
   // All-call latch (SPACE latches every channel); per-channel latch mask.
   uint32_t latch_mask = cfg.start_latched ? 0xFFFFFFFFu : 0u;
   bool quit = false;
@@ -870,15 +871,21 @@ int Run(int argc, char** argv) {
       }
 
       // Heal intent against confirmed membership: invite what should be in
-      // and is not, remove what should not be and is. Everyone missing from
-      // a channel goes in ONE batched invite (Zoom rate-limits back-to-back
-      // calls -- live 2026-08-29, a 12-person roster invited one call per
-      // person drew code 18 on every pass), and a refused person backs off
-      // 5s doubling to 60s rather than retrying every 2s.
+      // and is not, remove what should not be and is. ONE membership call
+      // per pass, rotated across channels -- Zoom's limiter is per CALL, so
+      // even per-channel batches fired back-to-back in one sweep draw code
+      // 18 (proven live twice today: first one call per person, then one
+      // batch per channel). One call every 2s fills a full desk in seconds
+      // and never trips it; a refused person still backs off 5s..60s.
       const std::vector<ChannelState> snap = bank.Snapshot();
-      for (int s = 0; s < static_cast<int>(snap.size()); ++s) {
+      const int heal_n = static_cast<int>(snap.size());
+      bool acted = false;
+      for (int k = 0; k < heal_n && !acted; ++k) {
+        const int s = (heal_rr + k) % heal_n;
         std::vector<unsigned int> missing;
         std::string missing_names;
+        unsigned int to_remove = 0;
+        bool have_remove = false;
         for (const RosterMember& m : roster.others()) {
           const bool want = intent.count({s, m.user_id}) != 0;
           const bool have =
@@ -891,10 +898,9 @@ int Run(int argc, char** argv) {
               if (!missing_names.empty()) missing_names += ", ";
               missing_names += m.name;
             }
-          } else if (!want && have) {
-            if (!bank.Remove(s, m.user_id, &err)) {
-              log_op("CH " + std::to_string(s + 1) + " remove failed: " + err);
-            }
+          } else if (!want && have && !have_remove) {
+            to_remove = m.user_id;
+            have_remove = true;
           }
         }
         if (!missing.empty()) {
@@ -914,6 +920,14 @@ int Run(int argc, char** argv) {
                                        5'000'000'000LL << std::min(b.first, 4));
             b.second = NowNs() + wait_ns;
           }
+          acted = true;
+          heal_rr = s + 1;
+        } else if (have_remove) {
+          if (!bank.Remove(s, to_remove, &err)) {
+            log_op("CH " + std::to_string(s + 1) + " remove failed: " + err);
+          }
+          acted = true;
+          heal_rr = s + 1;
         }
       }
     }
