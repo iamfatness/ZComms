@@ -111,12 +111,53 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# WebView2 -- the shell window's rendering engine. The panel is one HTML page;
+# hosting it in a WebView2 window makes zcomms its own native window instead
+# of a borrowed browser. SDK fetched at configure time from NuGet (loader is
+# redistributable; nothing vendored, nothing committed).
+# ---------------------------------------------------------------------------
+set(WEBVIEW2_VERSION "1.0.2739.15")
+set(WEBVIEW2_DIR "${CMAKE_BINARY_DIR}/webview2")
+if(NOT EXISTS "${WEBVIEW2_DIR}/build/native/include/WebView2.h")
+  message(STATUS "Fetching WebView2 SDK ${WEBVIEW2_VERSION}")
+  file(DOWNLOAD
+    "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/${WEBVIEW2_VERSION}"
+    "${CMAKE_BINARY_DIR}/webview2.nupkg" STATUS _wv2_dl)
+  list(GET _wv2_dl 0 _wv2_rc)
+  if(_wv2_rc EQUAL 0)
+    file(ARCHIVE_EXTRACT INPUT "${CMAKE_BINARY_DIR}/webview2.nupkg"
+         DESTINATION "${WEBVIEW2_DIR}")
+  else()
+    message(WARNING "WebView2 SDK download failed -- shell falls back to the browser window")
+  endif()
+endif()
+if(EXISTS "${WEBVIEW2_DIR}/build/native/include/WebView2.h")
+  set(ZCOMMS_HAVE_WEBVIEW2 TRUE)
+else()
+  set(ZCOMMS_HAVE_WEBVIEW2 FALSE)
+endif()
+
+# ---------------------------------------------------------------------------
 # zcomms -- the talkback panel itself. Phase 1's first vertical slice.
 # ---------------------------------------------------------------------------
 if(ZCOMMS_HAVE_SDK)
   add_executable(zcomms src/app/main.cpp src/app/control_server.cpp
-                        src/app/version.rc)
-  target_link_libraries(zcomms PRIVATE zcomms_zoom winmm ws2_32 shell32)
+                        src/app/zoom_oauth.cpp src/app/version.rc)
+  target_link_libraries(zcomms PRIVATE zcomms_zoom winmm ws2_32 shell32
+                        winhttp crypt32 bcrypt)
+  if(ZCOMMS_HAVE_WEBVIEW2)
+    target_sources(zcomms PRIVATE src/app/shell_window.cpp)
+    target_include_directories(zcomms PRIVATE
+      "${WEBVIEW2_DIR}/build/native/include")
+    target_link_libraries(zcomms PRIVATE
+      "${WEBVIEW2_DIR}/build/native/x64/WebView2Loader.dll.lib")
+    target_compile_definitions(zcomms PRIVATE ZCOMMS_HAVE_WEBVIEW2)
+    add_custom_command(TARGET zcomms POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${WEBVIEW2_DIR}/runtimes/win-x64/native/WebView2Loader.dll"
+              "$<TARGET_FILE_DIR:zcomms>"
+      COMMENT "Staging WebView2 loader beside zcomms")
+  endif()
   if(MSVC)
     # /W3, SDK headers included transitively.
     target_compile_options(zcomms PRIVATE /W3 /utf-8)

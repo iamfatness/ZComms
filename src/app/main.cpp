@@ -33,6 +33,10 @@
 #include "audio_defs.h"
 #include "clock.h"
 #include "control_server.h"
+#include "zoom_oauth.h"
+#ifdef ZCOMMS_HAVE_WEBVIEW2
+#include "shell_window.h"
+#endif
 #include "devices.h"
 #include "engine.h"
 #include "frame_ring.h"
@@ -59,6 +63,11 @@ namespace {
 
 struct AppConfig {
   std::string public_app_key;
+  // Anonymous guest join under the bare public app key. OFF by default:
+  // the product joins as the signed-in operator (OAuth broker + ZAK), which
+  // is what CoreVideo does and what lifts the cross-account 504 refusal.
+  // The flag remains for scripted same-account test runs.
+  bool anon = false;
   uint64_t meeting_number = 0;
   std::string meeting_password;
   std::string display_name = "ZComms";
@@ -327,6 +336,7 @@ int Run(int argc, char** argv) {
     else if (a == "--channels") cfg.channels = std::atoi(next("--channels"));
     else if (a == "--no-ui") cfg.ui_port = 0;
     else if (a == "--ui-port") cfg.ui_port = static_cast<uint16_t>(std::atoi(next("--ui-port")));
+    else if (a == "--anon") cfg.anon = true;
     else if (a == "--open") cfg.open_browser = true;
     else if (a == "--no-open") cfg.open_browser = false;
     else {
@@ -356,6 +366,13 @@ int Run(int argc, char** argv) {
   std::vector<std::tuple<int, unsigned int, bool>> assign_edges;
   std::mutex join_m;
   std::string join_pending;
+  std::string passcode_pending;
+
+  // The operator's Zoom session. signed_in mirrors the token store so the
+  // idle loop can gate the join card without a disk read per tick; --anon
+  // short-circuits it for scripted same-account runs.
+  ZoomOAuth oauth(cfg.ui_port != 0 ? cfg.ui_port : 7350);
+  std::atomic<bool> signed_in{cfg.anon || oauth.signed_in()};
 
   std::unique_ptr<ControlServer> ui;
   if (cfg.ui_port != 0) {
@@ -390,6 +407,9 @@ int Run(int argc, char** argv) {
             // The whole argument is the pasted link (it may contain spaces).
             std::lock_guard<std::mutex> lock(join_m);
             join_pending = arg;
+          } else if (verb == "passcode") {
+            std::lock_guard<std::mutex> lock(join_m);
+            passcode_pending = a1;
           } else if (verb == "sidetone") {
             side_req.store(a1 == "on" ? 1 : 0);
           } else if (verb == "aec") {
@@ -397,15 +417,42 @@ int Run(int argc, char** argv) {
           } else if (verb == "gain") {
             gain_req.store(std::atoi(a1.c_str()));
             gain_pending.store(true);
+          } else if (verb == "signin") {
+            // System browser, never the panel WebView: the operator's Zoom
+            // session (and their password manager) lives there.
+            const std::string url = oauth.BeginSignIn();
+            ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr,
+                          SW_SHOWNORMAL);
+          } else if (verb == "signout") {
+            oauth.SignOut();
+            signed_in.store(false);
           } else if (verb == "quit") {
             quit_req.store(true);
           }
         });
+    ui->SetOAuthHandler([&](const std::string& query) -> std::string {
+      std::string cb_err;
+      if (oauth.HandleCallback(query, &cb_err)) {
+        signed_in.store(true);
+        return "";
+      }
+      return cb_err;
+    });
     std::string ui_err;
     if (ui->Start(cfg.ui_port, &ui_err)) {
       const std::string url = "http://127.0.0.1:" + std::to_string(cfg.ui_port);
       std::printf("[ui] panel at %s\n", url.c_str());
-      if (cfg.open_browser) OpenAppWindow(url);
+      if (cfg.open_browser) {
+        // The app's own window first (WebView2, panel at its designed
+        // 1000x640); a borrowed browser frame only if the runtime is absent.
+        // Closing the shell window is quitting the app.
+        bool shown = false;
+#ifdef ZCOMMS_HAVE_WEBVIEW2
+        shown = StartShellWindow(url, 1000, 640,
+                                 [&quit_req]() { quit_req.store(true); });
+#endif
+        if (!shown) OpenAppWindow(url);
+      }
     } else {
       std::printf("WARNING: %s -- running without the panel\n", ui_err.c_str());
       ui.reset();
@@ -458,6 +505,13 @@ int Run(int argc, char** argv) {
       meeting_arg.clear();
     }
     if (ui) {
+      if (!signed_in.load()) {
+        // No join card until there is an account to join as.
+        publish_phase("signin", "SIGN IN WITH ZOOM TO BEGIN");
+        if (quit_req.load()) return 0;
+        Sleep(100);
+        continue;
+      }
       publish_phase("idle", "PASTE A MEETING LINK");
       if (quit_req.load()) return 0;
       Sleep(100);
@@ -467,7 +521,14 @@ int Run(int argc, char** argv) {
         join_pending.clear();
       }
     } else {
-      // Headless fallback: the console conversation.
+      // Headless fallback: the console conversation. Sign-in needs the
+      // panel's callback server, so headless requires an existing session
+      // (or the explicit --anon escape hatch).
+      if (!signed_in.load()) {
+        std::printf("ERROR: not signed in with Zoom. Run the panel once to "
+                    "sign in, or pass --anon for a same-account guest join.\n");
+        return 2;
+      }
       std::printf("Paste the Zoom meeting link (or meeting ID) and press "
                   "Enter:\n> ");
       std::string line;
@@ -488,14 +549,32 @@ int Run(int argc, char** argv) {
   //  -1  bring-up failed                     -> back to the join card
   const auto session = [&]() -> int {
   // --- Zoom bring-up --------------------------------------------------------
-  ZoomClient zoom;
+  // Credentials first, SDK second: the signed-in join needs a broker-minted
+  // SDK JWT + the operator's ZAK, and fetching them before InitSDK means an
+  // expired sign-in never leaves a half-initialised SDK behind.
   std::string err;
+  std::string sdk_jwt, zak;
+  if (!cfg.anon) {
+    publish_phase("joining", "CHECKING ZOOM SIGN-IN...");
+    if (!oauth.EnsureJoinCredentials(&sdk_jwt, &zak, &err)) {
+      log_op("Zoom sign-in problem: " + err);
+      // A dead session sends the panel back to the sign-in card, not the
+      // join card -- retrying the join can never fix a revoked token.
+      if (!oauth.signed_in()) signed_in.store(false);
+      return -1;
+    }
+  }
+
+  ZoomClient zoom;
   if (!zoom.Init(&err)) {
     log_op(err + " -- " + SdkConflictHint());
     return -1;
   }
-  if (!zoom.Authenticate(cfg.public_app_key, "", "", 30000, &err)) {
-    log_op("sign-in failed: " + err);
+  const bool auth_ok =
+      cfg.anon ? zoom.Authenticate(cfg.public_app_key, "", "", 30000, &err)
+               : zoom.AuthenticateWithJwt(sdk_jwt, 30000, &err);
+  if (!auth_ok) {
+    log_op("SDK auth failed: " + err);
     zoom.Cleanup();
     return -1;
   }
@@ -504,8 +583,47 @@ int Run(int argc, char** argv) {
   std::printf("[zoom] joining meeting %llu as \"%s\" -- admit it if a waiting "
               "room is on\n",
               (unsigned long long)cfg.meeting_number, cfg.display_name.c_str());
+  // The join tick: keep the panel honest while Join blocks, and run the
+  // passcode conversation when the meeting demands one the operator didn't
+  // paste (bare meeting IDs do this; full invite links carry the passcode).
+  int last_pc_state = 0;
+  ZOOM_SDK_NAMESPACE::MeetingStatus last_js =
+      ZOOM_SDK_NAMESPACE::MEETING_STATUS_IDLE;
+  const auto join_tick = [&]() {
+    // Mirror real SDK status to the panel; "ADMIT..." while the SDK sits in
+    // WAITING_FOR_HOST reads as a hang from the operator's chair.
+    const ZOOM_SDK_NAMESPACE::MeetingStatus js = zoom.status();
+    if (js != last_js && zoom.passcode_state() == 0) {
+      last_js = js;
+      if (js == ZOOM_SDK_NAMESPACE::MEETING_STATUS_WAITINGFORHOST) {
+        publish_phase("joining", "WAITING FOR THE HOST TO START THE MEETING");
+      } else if (js == ZOOM_SDK_NAMESPACE::MEETING_STATUS_IN_WAITING_ROOM) {
+        publish_phase("joining", "IN THE WAITING ROOM -- ADMIT \"" +
+                                     cfg.display_name + "\"");
+      } else if (js == ZOOM_SDK_NAMESPACE::MEETING_STATUS_RECONNECTING) {
+        publish_phase("joining", "RECONNECTING...");
+      }
+    }
+    const int pc = zoom.passcode_state();
+    if (pc != 0 && pc != last_pc_state) {
+      publish_phase("joining", pc == 2 ? "WRONG PASSCODE -- TRY AGAIN"
+                                       : "ENTER THE MEETING PASSCODE");
+    }
+    last_pc_state = pc;
+    if (pc != 0) {
+      std::string p;
+      {
+        std::lock_guard<std::mutex> lock(join_m);
+        p.swap(passcode_pending);
+      }
+      if (!p.empty()) {
+        publish_phase("joining", "CHECKING PASSCODE...");
+        zoom.SubmitPasscode(p);
+      }
+    }
+  };
   if (!zoom.Join(cfg.meeting_number, cfg.meeting_password, cfg.display_name,
-                 600000, &err)) {
+                 600000, &err, join_tick, zak)) {
     log_op("could not join: " + err);
     zoom.Cleanup();
     return -1;

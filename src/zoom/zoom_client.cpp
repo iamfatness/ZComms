@@ -91,6 +91,16 @@ std::string MeetingFailReason(int code) {
       return "private meeting, sign-in required";
     case MEETING_FAIL_BLOCKED_BY_ACCOUNT_ADMIN:
       return "blocked by account admin";
+    case MEETING_FAIL_APP_CAN_NOT_ANONYMOUS_JOIN_MEETING:
+      // The PKCE app identity's boundary, hit live 2026-08-29: guest joins
+      // are only allowed into meetings on the Zoom account that authorized
+      // this app. Anything else fails here, before any passcode business.
+      return "this app can only join meetings hosted by its own Zoom account "
+             "-- start the meeting from the account that installed ZComms";
+    case MEETING_FAIL_HOST_DISALLOW_OUTSIDE_USER_JOIN:
+      return "the host's account does not allow outside participants";
+    case MEETING_FAIL_UNABLE_TO_JOIN_EXTERNAL_MEETING:
+      return "this account is not allowed to join external meetings";
     default: return "code " + std::to_string(code);
   }
 }
@@ -129,6 +139,38 @@ bool ZoomClient::Init(std::string* error) {
   }
   sdk_initialised_ = true;
   std::printf("[sdk] initialised, version %ls\n", GetSDKVersion());
+  return true;
+}
+
+bool ZoomClient::AuthenticateWithJwt(const std::string& jwt, int timeout_ms,
+                                     std::string* error) {
+  if (CreateAuthService(&auth_) != SDKERR_SUCCESS || auth_ == nullptr) {
+    *error = "CreateAuthService failed";
+    return false;
+  }
+  auth_->SetEvent(this);
+
+  AuthContext ctx;
+  const std::wstring jwt_w = Widen(jwt);
+  ctx.jwt_token = jwt_w.c_str();
+  std::printf("[sdk] authenticating with a broker-minted SDK JWT\n");
+
+  const SDKError err = auth_->SDKAuth(ctx);
+  if (err != SDKERR_SUCCESS) {
+    *error = "SDKAuth call failed: " + std::to_string(static_cast<int>(err));
+    return false;
+  }
+  const int64_t deadline = NowNs() + static_cast<int64_t>(timeout_ms) * 1'000'000;
+  while (!auth_returned_.load() && NowNs() < deadline) Pump(50);
+  if (!auth_returned_.load()) {
+    *error = "authentication timed out after " + std::to_string(timeout_ms) + " ms";
+    return false;
+  }
+  const AuthResult result = static_cast<AuthResult>(auth_result_.load());
+  if (result != AUTHRET_SUCCESS) {
+    *error = std::string("authentication failed: ") + AuthResultName(result);
+    return false;
+  }
   return true;
 }
 
@@ -187,15 +229,27 @@ bool ZoomClient::Authenticate(const std::string& public_app_key,
 
 bool ZoomClient::Join(uint64_t meeting_number, const std::string& password,
                       const std::string& display_name, int timeout_ms,
-                      std::string* error) {
+                      std::string* error, const std::function<void()>& on_tick,
+                      const std::string& zak) {
   if (CreateMeetingService(&meeting_) != SDKERR_SUCCESS || meeting_ == nullptr) {
     *error = "CreateMeetingService failed";
     return false;
   }
   meeting_->SetEvent(this);
+  display_name_ = display_name;
+  passcode_state_.store(0);
+  pw_handler_ = nullptr;
+  last_fail_code_.store(0);
+  // Without this listener a passcode-protected meeting joined by bare ID
+  // fails opaquely -- the SDK asks for the passcode via callback and gives
+  // up when nobody answers.
+  if (IMeetingConfiguration* mc = meeting_->GetMeetingConfiguration()) {
+    mc->SetEvent(this);
+  }
 
   const std::wstring name_w = Widen(display_name);
   const std::wstring pw_w = Widen(password);
+  const std::wstring zak_w = Widen(zak);
 
   JoinParam jp;
   jp.userType = SDK_UT_WITHOUT_LOGIN;
@@ -203,6 +257,7 @@ bool ZoomClient::Join(uint64_t meeting_number, const std::string& password,
   p.meetingNumber = meeting_number;
   p.userName = name_w.c_str();
   p.psw = pw_w.c_str();
+  if (!zak_w.empty()) p.userZAK = zak_w.c_str();
   p.isVideoOff = true;
   // Audio explicitly ON: the whole point is a virtual mic on the meeting's
   // audio, and joining with audio off would install a mic onto nothing.
@@ -217,6 +272,7 @@ bool ZoomClient::Join(uint64_t meeting_number, const std::string& password,
   const int64_t deadline = NowNs() + static_cast<int64_t>(timeout_ms) * 1'000'000;
   while (NowNs() < deadline) {
     Pump(100);
+    if (on_tick) on_tick();
     const MeetingStatus s = status_.load();
     if (s == MEETING_STATUS_INMEETING) return true;
     if (s == MEETING_STATUS_FAILED) {
@@ -224,7 +280,9 @@ bool ZoomClient::Join(uint64_t meeting_number, const std::string& password,
       return false;
     }
     if (s == MEETING_STATUS_ENDED) {
-      *error = "meeting ended before the harness got in";
+      const int code = last_fail_code_.load();
+      *error = code != 0 ? "join failed: " + MeetingFailReason(code)
+                         : "the meeting ended before we got in";
       return false;
     }
   }
@@ -390,13 +448,82 @@ void ZoomClient::onNotificationServiceStatus(SDKNotificationServiceStatus,
 
 void ZoomClient::onMeetingStatusChanged(MeetingStatus status, int result) {
   status_.store(status);
-  if (status == MEETING_STATUS_FAILED || status == MEETING_STATUS_ENDED) {
+  // FAILED carries the real reason; the ENDED that follows it carries 0 and
+  // must not clobber it (live: FAILED 504 -> ENDED 0 reported as "code 0").
+  if (status == MEETING_STATUS_FAILED ||
+      (status == MEETING_STATUS_ENDED && last_fail_code_.load() == 0)) {
     last_fail_code_.store(result);
   }
   std::printf("[sdk] meeting status: %s%s\n", MeetingStatusName(status),
               (status == MEETING_STATUS_FAILED)
                   ? (" (" + MeetingFailReason(result) + ")").c_str()
                   : "");
+}
+
+void ZoomClient::onInputMeetingPasswordAndScreenNameNotification(
+    IMeetingPasswordAndScreenNameHandler* handler) {
+  if (!handler) return;
+  const auto type = handler->GetRequiredInfoType();
+  if (type == IMeetingPasswordAndScreenNameHandler::REQUIRED_INFO_TYPE_Password ||
+      type == IMeetingPasswordAndScreenNameHandler::
+                  REQUIRED_INFO_TYPE_Password4WrongPassword ||
+      type == IMeetingPasswordAndScreenNameHandler::
+                  REQUIRED_INFO_TYPE_PasswordAndScreenName) {
+    pw_handler_ = handler;
+    const bool wrong =
+        type == IMeetingPasswordAndScreenNameHandler::
+                    REQUIRED_INFO_TYPE_Password4WrongPassword;
+    passcode_state_.store(wrong ? 2 : 1);
+    std::printf("[sdk] meeting requires a passcode%s\n",
+                wrong ? " (previous one was wrong)" : "");
+  } else if (type == IMeetingPasswordAndScreenNameHandler::
+                         REQUIRED_INFO_TYPE_ScreenName) {
+    // We always have a name; answer inline and move on.
+    handler->InputMeetingScreenName(Widen(display_name_).c_str());
+  } else {
+    handler->Cancel();
+  }
+}
+
+// A guest join can be asked to identify itself (name + email) before entering
+// -- common on meetings created outside this account. Nobody is at a dialog
+// to answer, so answer inline; ignoring the prompt kills the join with an
+// opaque ENDED.
+void ZoomClient::onJoinMeetingNeedUserInfo(
+    IMeetingInputUserInfoHandler* handler) {
+  if (!handler) return;
+  std::printf("[sdk] meeting wants name+email; answering as \"%s\"\n",
+              display_name_.c_str());
+  const SDKError e = handler->InputUserInfo(Widen(display_name_).c_str(),
+                                            L"operator@zcomms.app");
+  if (e != SDKERR_SUCCESS) {
+    std::printf("[sdk] InputUserInfo failed: %d\n", static_cast<int>(e));
+  }
+}
+
+// The remaining prompts have no sane automatic answer; name them loudly so a
+// stuck join says why instead of dying as an opaque ENDED.
+void ZoomClient::onWebinarNeedRegisterNotification(
+    IWebinarNeedRegisterHandler*) {
+  std::printf("[sdk] this webinar requires registration -- cannot join\n");
+}
+void ZoomClient::onEndOtherMeetingToJoinMeetingNotification(
+    IEndOtherMeetingToJoinMeetingHandler*) {
+  std::printf("[sdk] SDK says another meeting is in progress\n");
+}
+void ZoomClient::onWebinarNeedInputScreenName(IWebinarInputScreenNameHandler*) {
+  std::printf("[sdk] webinar wants a screen name prompt\n");
+}
+
+bool ZoomClient::SubmitPasscode(const std::string& passcode) {
+  IMeetingPasswordAndScreenNameHandler* h = pw_handler_;
+  if (!h || passcode.empty()) return false;
+  // The SDK destroys the handler inside this call; a wrong passcode comes
+  // back as a fresh notification with the Password4WrongPassword type.
+  pw_handler_ = nullptr;
+  passcode_state_.store(0);
+  return h->InputMeetingPasswordAndScreenName(Widen(passcode).c_str(),
+                                              Widen(display_name_).c_str());
 }
 
 void ZoomClient::onMeetingStatisticsWarningNotification(StatisticsWarningType) {}
