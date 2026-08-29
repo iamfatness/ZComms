@@ -149,6 +149,22 @@ the exe); if the download or the runtime is absent the app falls back to the
 old Edge/Chrome `--app` window. This is also the Mac-port shape: same panel
 HTML, WKWebView shell.
 
+### Direct talk + the invite rate limit (2026-08-29, live 12-person meeting)
+
+**Zoom rate-limits back-to-back talkback calls (code 18) on INVITES too**,
+not just CreateChannel: the healer's one-batch-exchange-per-person every 2s
+drew `SDKERR_TOO_FREQUENT_CALL` on every pass. Rules now enforced in code:
+one `InviteMany` batch per channel per pass, per-(channel,person) backoff
+(5s doubling to 60s; 10s patience after a successful Execute for the async
+confirmation), prune intent/backoff when a person leaves (ids recycle).
+
+**The direct-talk model:** the full 16-channel bank is provisioned up front
+in ONE CreateChannel(16) request (keying must only SELECT); each capable
+participant auto-lands on their OWN channel so their key wears their name;
+spillover past 16 goes to the least-loaded channel; a partial grant proceeds
+after three rounds. Panel: ALL CALL + LATCH ALL (verbs `talkall`/`latchall`),
+empty spares hidden, chips = in-use channels + one spare.
+
 ### Signed-in joins: the CoreVideo auth pattern (2026-08-29)
 
 Owner rule: **no anonymous joins** -- ZComms follows CoreVideo's auth shape.
