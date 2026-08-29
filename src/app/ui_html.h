@@ -72,6 +72,14 @@ h2{font-size:10px;letter-spacing:.3em;color:var(--silk);font-weight:500;
   border-bottom-width:5px}
 .mod .key.hot{transform:translateY(4px)}
 .mod .tog{padding:7px 14px;font-size:10px}
+/* join card */
+.joincard{display:none;flex-direction:column;align-items:center;gap:14px;
+  padding:10px 0 6px}
+.joincard.show{display:flex}
+.joincard input{width:min(420px,86vw);padding:12px 14px;border-radius:6px;
+  border:1px solid #000;background:#14161a;color:var(--bone);
+  font:12px var(--mono);box-shadow:inset 0 2px 6px rgba(0,0,0,.6)}
+.joincard input:focus-visible{outline:2px solid var(--bone);outline-offset:2px}
 /* roster channel chips */
 .chips{display:flex;gap:4px}
 .chip{appearance:none;cursor:pointer;border:1px solid #000;border-radius:4px;
@@ -150,6 +158,12 @@ h2{font-size:10px;letter-spacing:.3em;color:var(--silk);font-weight:500;
       <ul class="roster" id="roster"><li>no one yet</li></ul>
     </section>
     <section class="chan" aria-label="channels">
+      <div class="joincard" id="joincard">
+        <div class="plate"><b>JOIN A MEETING</b><span id="joinstate">paste the Zoom link</span></div>
+        <input id="joinurl" type="text" placeholder="https://zoom.us/j/…  or meeting ID"
+               autocomplete="off" spellcheck="false">
+        <button class="tog on" id="joinbtn">CONNECT</button>
+      </div>
       <div class="bank" id="bank"></div>
       <div class="hint">HOLD A KEY (OR DIGIT) · SPACE = ALL CALL · LATCH FOR HANDS-FREE</div>
       <div class="row">
@@ -227,6 +241,10 @@ addEventListener('keyup',e=>{
 });
 addEventListener('blur',()=>mods.forEach(m=>m.setHeld(false)));
 
+const joinNow=()=>{const v=$('joinurl').value.trim();
+  if(v){act('join',v);$('joinstate').textContent='connecting…';}};
+$('joinbtn').onclick=joinNow;
+$('joinurl').addEventListener('keydown',e=>{if(e.key==='Enter')joinNow();});
 $('side').onclick=()=>act('sidetone',(S.sidetone?'off':'on'));
 $('aec').onclick=()=>act('aec',(S.aec?'off':'on'));
 $('g-dn').onclick=()=>act('gain',(S.gain-1));
@@ -238,6 +256,19 @@ es.onerror=()=>{$('state').textContent='LINK LOST';$('led-link').classList.remov
 
 function render(){
   const chans=S.channels||[];
+  const idle=S.phase!=='up';
+  $('joincard').classList.toggle('show',idle);
+  $('bank').style.display=idle?'none':'flex';
+  if(idle){
+    $('state').textContent=S.status||'—';
+    $('joinstate').textContent=(S.phase==='joining')?(S.status||'connecting…')
+                                                    :'paste the Zoom link';
+    $('meet').textContent='MTG —';
+    ['led-link','led-ch','led-tx'].forEach(i=>$(i).classList.remove('on'));
+    const ops=$('ops');ops.innerHTML='';
+    (S.log||[]).forEach(l=>{const sp=document.createElement('span');sp.textContent=l;ops.appendChild(sp);});
+    return;
+  }
   if(mods.length!==chans.length)buildBank(chans.length);
   $('meet').textContent='MTG '+(S.meeting||'—');
   $('state').textContent=S.status||'—';

@@ -225,6 +225,29 @@ section 2): on open speakers your monitor feeds back into the channel.
 )");
 }
 
+// Opens the panel as a standalone app window rather than a browser tab:
+// Edge/Chrome --app mode gives a chromeless window with its own taskbar
+// entry, which is the difference between "a tab I lose" and "the app".
+// Falls back to the default browser when neither is found.
+void OpenAppWindow(const std::string& url) {
+  const char* candidates[] = {
+      "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+  };
+  for (const char* exe : candidates) {
+    if (GetFileAttributesA(exe) == INVALID_FILE_ATTRIBUTES) continue;
+    const std::string args = "--app=" + url + " --window-size=1120,800";
+    if (reinterpret_cast<INT_PTR>(ShellExecuteA(nullptr, "open", exe,
+                                                args.c_str(), nullptr,
+                                                SW_SHOWNORMAL)) > 32) {
+      return;
+    }
+  }
+  ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
 std::string MeterBar(double peak) {
   const double db = peak > 1e-6 ? 20.0 * std::log10(peak) : -60.0;
   const double frac = db < -60.0 ? 0.0 : (db > 0.0 ? 1.0 : (db + 60.0) / 60.0);
@@ -283,30 +306,139 @@ int Run(int argc, char** argv) {
   LoadLocalEnv(&cfg, &meeting_arg);
   if (cfg.public_app_key.empty()) cfg.public_app_key = kDefaultPublicAppKey;
 
-  // A packaged exe gets double-clicked. No meeting on the command line is a
-  // conversation, not an error: ask for the join link the way a person would
-  // paste it.
-  if (meeting_arg.empty()) {
-    std::printf("ZComms %s -- talkback panel\n\n", kAppVersion);
-    std::printf("Paste the Zoom meeting link (or meeting ID) and press "
-                "Enter:\n> ");
-    std::string line;
-    if (!std::getline(std::cin, line) || line.empty()) {
-      PrintUsage();
-      return 2;
+  std::printf("ZComms %s -- talkback panel\n\n", kAppVersion);
+
+  // --- Control surface, FIRST ----------------------------------------------
+  // The panel is the product's face, so it exists from the first moment --
+  // including the join step, which lives in the panel rather than in a
+  // console prompt. Everything the server's threads touch here is an atomic
+  // or a mutex-guarded edge list applied later on the main thread.
+  std::atomic<uint32_t> ui_talk_mask{0};
+  std::atomic<int> side_req{-1}, aec_req{-1};
+  std::atomic<int> gain_req{0};
+  std::atomic<bool> gain_pending{false};
+  std::atomic<bool> quit_req{false};
+  std::mutex edge_m;
+  std::vector<std::pair<int, bool>> latch_edges;
+  std::vector<std::tuple<int, unsigned int, bool>> assign_edges;
+  std::mutex join_m;
+  std::string join_pending;
+
+  std::unique_ptr<ControlServer> ui;
+  if (cfg.ui_port != 0) {
+    ui = std::make_unique<ControlServer>(
+        kPanelHtml,
+        [&](const std::string& verb, const std::string& arg) {
+          const auto sp = arg.find(' ');
+          const std::string a1 = sp == std::string::npos ? arg : arg.substr(0, sp);
+          const std::string a2 = sp == std::string::npos ? "" : arg.substr(sp + 1);
+          if (verb == "talk") {
+            const int slot = std::atoi(a1.c_str());
+            const bool on = a2 == "on";
+            uint32_t m = ui_talk_mask.load();
+            for (;;) {
+              const uint32_t next = on ? (m | (1u << slot)) : (m & ~(1u << slot));
+              if (ui_talk_mask.compare_exchange_weak(m, next)) break;
+            }
+          } else if (verb == "latch") {
+            std::lock_guard<std::mutex> lock(edge_m);
+            latch_edges.emplace_back(std::atoi(a1.c_str()), a2 == "on");
+          } else if (verb == "assign") {
+            const auto colon = a1.find(':');
+            if (colon != std::string::npos) {
+              std::lock_guard<std::mutex> lock(edge_m);
+              assign_edges.emplace_back(
+                  std::atoi(a1.substr(0, colon).c_str()),
+                  static_cast<unsigned int>(
+                      std::strtoul(a1.substr(colon + 1).c_str(), nullptr, 10)),
+                  a2 == "on");
+            }
+          } else if (verb == "join") {
+            // The whole argument is the pasted link (it may contain spaces).
+            std::lock_guard<std::mutex> lock(join_m);
+            join_pending = arg;
+          } else if (verb == "sidetone") {
+            side_req.store(a1 == "on" ? 1 : 0);
+          } else if (verb == "aec") {
+            aec_req.store(a1 == "on" ? 1 : 0);
+          } else if (verb == "gain") {
+            gain_req.store(std::atoi(a1.c_str()));
+            gain_pending.store(true);
+          } else if (verb == "quit") {
+            quit_req.store(true);
+          }
+        });
+    std::string ui_err;
+    if (ui->Start(cfg.ui_port, &ui_err)) {
+      const std::string url = "http://127.0.0.1:" + std::to_string(cfg.ui_port);
+      std::printf("[ui] panel at %s\n", url.c_str());
+      if (cfg.open_browser) OpenAppWindow(url);
+    } else {
+      std::printf("WARNING: %s -- running without the panel\n", ui_err.c_str());
+      ui.reset();
     }
-    meeting_arg = line;
-  }
-  if (!ParseMeetingArg(meeting_arg, &cfg.meeting_number,
-                       &cfg.meeting_password)) {
-    std::printf("ERROR: could not read a meeting id out of \"%s\".\n\n",
-                meeting_arg.c_str());
-    PrintUsage();
-    return 2;
   }
 
-  std::printf("zcomms -- talkback panel\n\n");
-  std::printf("  USE A HEADSET: no echo cancellation on this path yet.\n\n");
+  // Ops log, panel-mirrored from the start.
+  std::vector<std::string> ops_log;
+  const auto log_op = [&](const std::string& line) {
+    std::printf("\n[zcomms] %s\n", line.c_str());
+    ops_log.push_back(line);
+    if (ops_log.size() > 5) ops_log.erase(ops_log.begin());
+  };
+
+  // Minimal state while there is no meeting yet: enough for the panel to
+  // show the join card and any parse error.
+  const auto publish_phase = [&](const std::string& phase,
+                                 const std::string& status) {
+    if (!ui) return;
+    std::string j = "{\"phase\":\"" + JsonEscape(phase) + "\",";
+    j += "\"status\":\"" + JsonEscape(status) + "\",";
+    j += "\"meeting\":\"\",\"channels\":[],\"roster\":[],\"log\":[";
+    bool first = true;
+    for (const std::string& l : ops_log) {
+      if (!first) j += ",";
+      first = false;
+      j += "\"" + JsonEscape(l) + "\"";
+    }
+    j += "]}";
+    ui->PublishState(j);
+  };
+
+  // --- Acquire a meeting ----------------------------------------------------
+  for (;;) {
+    if (!meeting_arg.empty() &&
+        ParseMeetingArg(meeting_arg, &cfg.meeting_number,
+                        &cfg.meeting_password)) {
+      break;
+    }
+    if (!meeting_arg.empty()) {
+      log_op("could not read a meeting id out of \"" + meeting_arg + "\"");
+      meeting_arg.clear();
+    }
+    if (ui) {
+      publish_phase("idle", "PASTE A MEETING LINK");
+      if (quit_req.load()) return 0;
+      Sleep(100);
+      std::lock_guard<std::mutex> lock(join_m);
+      if (!join_pending.empty()) {
+        meeting_arg = join_pending;
+        join_pending.clear();
+      }
+    } else {
+      // Headless fallback: the console conversation.
+      std::printf("Paste the Zoom meeting link (or meeting ID) and press "
+                  "Enter:\n> ");
+      std::string line;
+      if (!std::getline(std::cin, line) || line.empty()) {
+        PrintUsage();
+        return 2;
+      }
+      meeting_arg = line;
+    }
+  }
+  publish_phase("joining", "JOINING MEETING");
+  std::printf("  USE A HEADSET or keep ECHO CANCEL on.\n\n");
 
   // --- Zoom bring-up --------------------------------------------------------
   ZoomClient zoom;
@@ -322,6 +454,8 @@ int Run(int argc, char** argv) {
     zoom.Cleanup();
     return 1;
   }
+  publish_phase("joining", "JOINING -- ADMIT \"" + cfg.display_name +
+                               "\" IF A WAITING ROOM PROMPTS");
   std::printf("[zoom] joining meeting %llu as \"%s\" -- admit it if a waiting "
               "room is on\n",
               (unsigned long long)cfg.meeting_number, cfg.display_name.c_str());
@@ -365,6 +499,8 @@ int Run(int argc, char** argv) {
     }
     created = bank.channels_ready() >= n_channels;
     if (!created) {
+      publish_phase("joining", "MAKE \"" + cfg.display_name +
+                                   "\" HOST OR CO-HOST (Participants -> More)");
       std::printf(">>> promote \"%s\" to HOST or CO-HOST in the participant "
                   "list (retrying, %d)\n",
                   cfg.display_name.c_str(), attempt + 1);
@@ -429,83 +565,8 @@ int Run(int argc, char** argv) {
   // --- Main loop ------------------------------------------------------------
   // One thread does everything except audio: pumps the SDK, reads keys, heals
   // channel membership, redraws status. The audio path never waits on it.
-  // --- Control surface (the browser panel; plan §6.4) -----------------------
-  // Actions land on server threads and are applied here on the main loop, so
-  // everything below stays single-threaded. talk is level-state (the key is
-  // held or it is not); the rest are edge requests.
-  // Per-channel: bit i of ui_talk_mask = the panel holds CH i+1's key; latch
-  // likewise but applied as edges. assign requests carry "<slot>:<uid> on".
-  std::atomic<uint32_t> ui_talk_mask{0};
-  std::atomic<int> side_req{-1}, aec_req{-1};
-  std::atomic<int> gain_req{0};
-  std::atomic<bool> gain_pending{false};
-  std::atomic<bool> quit_req{false};
-  std::mutex edge_m;
-  std::vector<std::pair<int, bool>> latch_edges;          // slot, on
-  std::vector<std::tuple<int, unsigned int, bool>> assign_edges;
-
-  std::unique_ptr<ControlServer> ui;
-  if (cfg.ui_port != 0) {
-    ui = std::make_unique<ControlServer>(
-        kPanelHtml,
-        [&](const std::string& verb, const std::string& arg) {
-          // arg forms: "<slot> on|off" (talk/latch), "<slot>:<uid> on|off"
-          // (assign), "<db>" (gain), "on|off" (sidetone).
-          const auto sp = arg.find(' ');
-          const std::string a1 = sp == std::string::npos ? arg : arg.substr(0, sp);
-          const std::string a2 = sp == std::string::npos ? "" : arg.substr(sp + 1);
-          if (verb == "talk") {
-            const int slot = std::atoi(a1.c_str());
-            const bool on = a2 == "on";
-            uint32_t m = ui_talk_mask.load();
-            for (;;) {
-              const uint32_t next = on ? (m | (1u << slot)) : (m & ~(1u << slot));
-              if (ui_talk_mask.compare_exchange_weak(m, next)) break;
-            }
-          } else if (verb == "latch") {
-            std::lock_guard<std::mutex> lock(edge_m);
-            latch_edges.emplace_back(std::atoi(a1.c_str()), a2 == "on");
-          } else if (verb == "assign") {
-            const auto colon = a1.find(':');
-            if (colon != std::string::npos) {
-              std::lock_guard<std::mutex> lock(edge_m);
-              assign_edges.emplace_back(
-                  std::atoi(a1.substr(0, colon).c_str()),
-                  static_cast<unsigned int>(
-                      std::strtoul(a1.substr(colon + 1).c_str(), nullptr, 10)),
-                  a2 == "on");
-            }
-          } else if (verb == "sidetone") {
-            side_req.store(a1 == "on" ? 1 : 0);
-          } else if (verb == "aec") {
-            aec_req.store(a1 == "on" ? 1 : 0);
-          } else if (verb == "gain") {
-            gain_req.store(std::atoi(a1.c_str()));
-            gain_pending.store(true);
-          } else if (verb == "quit") {
-            quit_req.store(true);
-          }
-        });
-    std::string ui_err;
-    if (ui->Start(cfg.ui_port, &ui_err)) {
-      std::printf("[ui] panel at http://127.0.0.1:%u\n", cfg.ui_port);
-      if (cfg.open_browser) {
-        const std::string url = "http://127.0.0.1:" + std::to_string(cfg.ui_port);
-        ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-      }
-    } else {
-      std::printf("WARNING: %s -- running without the panel\n", ui_err.c_str());
-      ui.reset();
-    }
-  }
-
-  // Ops log: the last few operational lines, mirrored to the panel's ticker.
-  std::vector<std::string> ops_log;
-  const auto log_op = [&](const std::string& line) {
-    std::printf("\n[zcomms] %s\n", line.c_str());
-    ops_log.push_back(line);
-    if (ops_log.size() > 5) ops_log.erase(ops_log.begin());
-  };
+  // (Control surface + ops log were brought up before the meeting existed;
+  // from here on the main loop applies their edges.)
   log_op("station up -- " + std::to_string(n_channels) + " channel(s)");
 
   // Membership intent, per (slot, uid). Auto-policy: capable participants
@@ -643,7 +704,7 @@ int Run(int argc, char** argv) {
       }
       const std::vector<ChannelState> snap = bank.Snapshot();
       const uint32_t keys = bank.key_mask();
-      std::string j = "{";
+      std::string j = "{\"phase\":\"up\",";
       j += "\"meeting\":\"" + std::to_string(cfg.meeting_number) + "\",";
       j += "\"status\":\"" + status + "\",";
       j += std::string("\"talking\":") + (talking ? "true," : "false,");
