@@ -684,6 +684,21 @@ int Run(int argc, char** argv) {
   if (!zoom.UnmuteSelf(&err)) {
     std::printf("WARNING: could not open meeting audio: %s\n", err.c_str());
   }
+  // ...and auto-suppress what the open mic would otherwise broadcast: the
+  // ZoomISO pattern, confirmed by Zoom directly (2026-08-29, via the owner):
+  // own the raw mic buffers and "mute" by sending nothing. An installed,
+  // never-fed virtual mic gives an open-but-silent meeting mic, so the
+  // room hears nothing while the channels stay deliverable. Under an auth
+  // tier without the raw-data entitlement the callbacks never fire -- the
+  // meeting then hears whatever device Zoom captures, and the operator
+  // must point Zoom at a dead input; say which world we are in.
+  ZoomMicSource silent_mic;  // deliberately never fed
+  if (zoom.InstallVirtualMic(&silent_mic, &err)) {
+    log_op("meeting mic auto-suppressed (open but silent to the room)");
+  } else {
+    log_op("mic auto-suppress unavailable (" + err +
+           ") -- the room may hear Zoom's mic device");
+  }
 
   Roster roster;
   roster.Attach(zoom.GetParticipantsController());
