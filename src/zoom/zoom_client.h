@@ -70,6 +70,11 @@ class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
   int passcode_state() const { return passcode_state_.load(); }
   bool SubmitPasscode(const std::string& passcode);
 
+  // Local (non-Zoom) failure code: the signed-in account is already in a
+  // meeting on another device and we refused to end it. Chosen outside
+  // Zoom's MeetingFailCode range.
+  static constexpr int kFailAccountBusyElsewhere = 909001;
+
   // setExternalAudioSource. This one call is the entire TX path (plan §2).
   bool InstallVirtualMic(ZoomMicSource* source, std::string* error);
 
@@ -82,6 +87,11 @@ class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
   // an SDK client can require a consent handshake this harness does not
   // implement, so it unmutes itself.
   bool UnmuteSelf(std::string* error);
+
+  // Whether this client's meeting audio is muted. Talkback DELIVERY only
+  // happens while it is open (owner-found live, 2026-08-29: muted = sends
+  // accepted by the SDK, silence at every member).
+  bool SelfMuted();
 
   // Logs this client's audio connection and mute state, so "the send window
   // never opened" comes with the reason attached instead of being a mystery.

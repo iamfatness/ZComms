@@ -111,6 +111,18 @@ void AudioEngine::OnCapture(const float* mono, int frames) {
     float* buf = scratch_.data();
     std::copy(frame, frame + kFrameSamples, buf);
 
+    // Diagnostic tone: REPLACES the mic at the top of the chain so it rides
+    // every downstream stage a voice would (AEC, gain, limiter, envelope,
+    // ring, pacer). -12 dBFS, 700 Hz.
+    if (test_tone_.load()) {
+      constexpr double kToneHz = 700.0, kTwoPi = 6.283185307179586;
+      for (int i = 0; i < kFrameSamples; ++i) {
+        buf[i] = static_cast<float>(0.25 * std::sin(tone_phase_));
+        tone_phase_ += kTwoPi * kToneHz / kSampleRate;
+        if (tone_phase_ > kTwoPi) tone_phase_ -= kTwoPi;
+      }
+    }
+
     // Echo cancellation before anything else touches the signal. The
     // canceller models microphone-input against monitor-output; gain or
     // limiting applied first would look like a time-varying acoustic path
@@ -127,7 +139,10 @@ void AudioEngine::OnCapture(const float* mono, int frames) {
     for (int i = 0; i < kFrameSamples; ++i) {
       peak = std::max(peak, std::fabs(static_cast<double>(buf[i])));
     }
-    peak *= 0.995;  // slow decay so the display falls back, not sticks
+    // Fall like a broadcast PPM: ~0.9/frame is ~46 dB/s -- attack instant,
+    // release fast enough to read speech. The old 0.995 took ~9 SECONDS to
+    // fall 20 dB, which read as a stuck meter (owner, live 2026-08-29).
+    peak *= 0.90;
     capture_peak_.store(peak);
 
     ptt_.Process(buf, kFrameSamples);
@@ -155,10 +170,14 @@ void AudioEngine::OnMonitor(float* out, int frames) {
   if (frames <= 0) return;
   sidetone_.Read(out, static_cast<size_t>(frames));
   sidetone_gain_.Process(out, frames);
-  // The far-end reference: exactly what is about to leave the speakers,
-  // post-fader -- the canceller must model the path from what was actually
-  // played, not a pre-gain copy.
-  if (aec_) aec_->FeedPlayback(out, frames);
+  // The sidetone does NOT feed the echo canceller's reference. The
+  // reference should be far-end playback (meeting audio out of speakers);
+  // the sidetone is the operator's own voice, which is simply the wrong
+  // signal. Benched during the 2026-08-29 no-audio hunt: a self-referenced
+  // canceller at this timing passes through (0.4 dB, pinned in test_aec) --
+  // so this decoupling is hygiene, not the incident's fix. Until a true
+  // far-end reference exists (a WASAPI loopback of the meeting playback
+  // device), the canceller runs reference-starved, i.e. passthrough.
 }
 
 EngineStats AudioEngine::stats() const {

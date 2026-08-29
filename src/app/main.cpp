@@ -24,6 +24,8 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <algorithm>
+#include <map>
 #include <set>
 #include <string>
 #include <thread>
@@ -90,9 +92,12 @@ struct AppConfig {
   // The panel opens itself by default: a packaged app's face is the panel,
   // and a double-clicked exe that silently listens on a port looks broken.
   bool open_browser = true;
-  // Talkback channels to create (1..16). Participants land on CH 1 by
-  // default; the panel moves them.
-  int channels = 1;
+  // Talkback channels to create (1..16). The whole bank by default: every
+  // panelist gets their OWN standing channel (their key = their name, a
+  // direct line), all-call spans them, and the chips regroup people. Keying
+  // must only ever SELECT -- provisioning anything on a press costs the
+  // first syllable (CoreVideo talkback, live-measured).
+  int channels = 16;
 };
 
 // The seam between the paced TX thread and the channel bank. "Nothing keyed"
@@ -103,11 +108,23 @@ class ChannelBankSink : public FrameSink {
   bool CanSend() override { return bank_->channels_ready() > 0; }
   bool Send(const int16_t* pcm, int samples) override {
     if (bank_->key_mask() == 0) return true;
+    // The peak of what actually leaves for Zoom, post-envelope: the number
+    // that separates "transmitting your voice" from "keyed but shipping
+    // silence" (an envelope/mute defect) at a glance.
+    int peak = 0;
+    for (int i = 0; i < samples; ++i) {
+      const int a = pcm[i] < 0 ? -pcm[i] : pcm[i];
+      if (a > peak) peak = a;
+    }
+    tx_peak_.store(peak);
     return bank_->SendToKeyed(pcm, samples) > 0;
   }
+  // 0..32767; only meaningful while something is keyed.
+  int tx_peak() const { return tx_peak_.load(); }
 
  private:
   TalkbackChannels* bank_;
+  std::atomic<int> tx_peak_{0};
 };
 
 std::string JsonEscape(const std::string& s) {
@@ -357,7 +374,8 @@ int Run(int argc, char** argv) {
   // console prompt. Everything the server's threads touch here is an atomic
   // or a mutex-guarded edge list applied later on the main thread.
   std::atomic<uint32_t> ui_talk_mask{0};
-  std::atomic<int> side_req{-1}, aec_req{-1};
+  std::atomic<bool> ui_allcall{false};  // the panel's ALL CALL key
+  std::atomic<int> side_req{-1}, aec_req{-1}, tone_req{-1};
   std::atomic<int> gain_req{0};
   std::atomic<bool> gain_pending{false};
   std::atomic<bool> quit_req{false};
@@ -367,6 +385,8 @@ int Run(int argc, char** argv) {
   std::mutex join_m;
   std::string join_pending;
   std::string passcode_pending;
+  std::mutex dev_m;
+  std::string mic_pending, out_pending;  // device switches from settings
 
   // The operator's Zoom session. signed_in mirrors the token store so the
   // idle loop can gate the join card without a disk read per tick; --anon
@@ -417,6 +437,20 @@ int Run(int argc, char** argv) {
           } else if (verb == "gain") {
             gain_req.store(std::atoi(a1.c_str()));
             gain_pending.store(true);
+          } else if (verb == "tone") {
+            tone_req.store(a1 == "on" ? 1 : 0);
+          } else if (verb == "setmic") {
+            // Device names carry spaces; the whole argument is the name.
+            std::lock_guard<std::mutex> lock(dev_m);
+            mic_pending = arg;
+          } else if (verb == "setout") {
+            std::lock_guard<std::mutex> lock(dev_m);
+            out_pending = arg;
+          } else if (verb == "talkall") {
+            ui_allcall.store(a1 == "on");
+          } else if (verb == "latchall") {
+            std::lock_guard<std::mutex> lock(edge_m);
+            latch_edges.emplace_back(-1, a1 == "on");
           } else if (verb == "signin") {
             // System browser, never the panel WebView: the operator's Zoom
             // session (and their password manager) lives there.
@@ -451,7 +485,15 @@ int Run(int argc, char** argv) {
         shown = StartShellWindow(url, 1000, 640,
                                  [&quit_req]() { quit_req.store(true); });
 #endif
-        if (!shown) OpenAppWindow(url);
+        if (!shown) {
+          OpenAppWindow(url);
+        } else {
+          // The panel is the app; the console is a diagnostic stream, not
+          // a second face. Live 2026-08-29 ("logs are going crazy"): the
+          // SDK's per-event chatter scrolling next to the panel read as a
+          // malfunction. Headless runs keep the console.
+          ShowWindow(GetConsoleWindow(), SW_HIDE);
+        }
       }
     } else {
       std::printf("WARNING: %s -- running without the panel\n", ui_err.c_str());
@@ -459,9 +501,12 @@ int Run(int argc, char** argv) {
     }
   }
 
-  // Ops log, panel-mirrored from the start.
+  // Ops log, panel-mirrored from the start. Consecutive repeats collapse:
+  // a retrying failure is one fact, not a scrolling wall (live 2026-08-29,
+  // five identical invite-failure lines filled the ticker).
   std::vector<std::string> ops_log;
   const auto log_op = [&](const std::string& line) {
+    if (!ops_log.empty() && ops_log.back() == line) return;
     std::printf("\n[zcomms] %s\n", line.c_str());
     ops_log.push_back(line);
     if (ops_log.size() > 5) ops_log.erase(ops_log.begin());
@@ -632,6 +677,13 @@ int Run(int argc, char** argv) {
   if (!zoom.JoinVoip(&err)) {
     std::printf("WARNING: %s\n", err.c_str());
   }
+  // Talkback DELIVERY requires this client's meeting audio to be OPEN --
+  // owner-found live 2026-08-29: joined muted (mute-on-entry), every send
+  // was accepted and every member heard silence; unmuting made the same
+  // channel audible. Open it now and keep it open (housekeeping re-opens).
+  if (!zoom.UnmuteSelf(&err)) {
+    std::printf("WARNING: could not open meeting audio: %s\n", err.c_str());
+  }
 
   Roster roster;
   roster.Attach(zoom.GetParticipantsController());
@@ -661,6 +713,15 @@ int Run(int argc, char** argv) {
       zoom.Pump(100);
     }
     created = bank.channels_ready() >= n_channels;
+    // A meeting may grant fewer than the full bank; a partial bank is a
+    // working intercom, not a bring-up failure. Give the full count three
+    // rounds, then take what Zoom gave.
+    if (!created && attempt >= 2 && bank.channels_ready() > 0) {
+      log_op(std::to_string(bank.channels_ready()) + " of " +
+             std::to_string(n_channels) + " channels granted -- continuing");
+      created = true;
+      break;
+    }
     if (!created) {
       publish_phase("joining", "MAKE \"" + cfg.display_name +
                                    "\" HOST OR CO-HOST (Participants -> More)");
@@ -739,6 +800,20 @@ int Run(int argc, char** argv) {
   std::set<unsigned int> auto_assigned;
   std::set<unsigned int> warned_no_talkback;
   int64_t next_house_ns = 0;
+  // Per-(slot,person) invite pacing: {attempts, earliest next try}. Zoom
+  // rate-limits back-to-back talkback calls; hammering a refusal every
+  // housekeeping pass turns one code-18 into a permanent wall of them.
+  std::map<std::pair<int, unsigned int>, std::pair<int, int64_t>>
+      invite_backoff;
+  int heal_rr = 0;  // round-robin start slot for the one-call-per-pass healer
+  int64_t next_heal_ns = 0;
+  uint32_t prev_keys = 0;      // for keyed-an-empty-channel warnings
+  uint32_t prev_sent_mask = 0; // for first-audio-into-channel notices
+  int64_t keyed_silent_since = 0;
+  // Device lists for the settings drawer, refreshed on a lazy cadence --
+  // WASAPI enumeration is cheap but not free, and devices rarely change.
+  int64_t next_dev_ns = 0;
+  std::string dev_json;
   // All-call latch (SPACE latches every channel); per-channel latch mask.
   uint32_t latch_mask = cfg.start_latched ? 0xFFFFFFFFu : 0u;
   bool quit = false;
@@ -791,7 +866,46 @@ int Run(int argc, char** argv) {
       next_house_ns = NowNs() + 2'000'000'000LL;
       zoom.AdmitAllWaiting();  // no-op unless we are host
 
-      // Default policy: a new capable participant lands on CH 1.
+      // Talkback only delivers while the meeting mic is open; a host mute
+      // (or mute-all) silently kills every channel, so re-open and say so.
+      if (zoom.SelfMuted()) {
+        std::string uerr;
+        if (zoom.UnmuteSelf(&uerr)) {
+          log_op("meeting mic re-opened -- talkback delivery needs it");
+        } else {
+          log_op("meeting mic is MUTED (talkback is dead until it opens): " +
+                 uerr);
+        }
+      }
+
+      // Prune intent for people no longer here: user ids are meeting-scoped
+      // and recycled (plan §5) -- a stale id must not keep a channel
+      // "occupied" or the direct-key pool drains on churn.
+      {
+        std::set<unsigned int> present;
+        for (const RosterMember& m : roster.others()) present.insert(m.user_id);
+        for (auto it = intent.begin(); it != intent.end();) {
+          it = present.count(it->second) ? std::next(it) : intent.erase(it);
+        }
+        for (auto it = invite_backoff.begin(); it != invite_backoff.end();) {
+          it = present.count(it->first.second) ? std::next(it)
+                                               : invite_backoff.erase(it);
+        }
+      }
+
+      // Default policy: a new capable participant gets their OWN channel --
+      // that channel's key becomes their direct-talk key, and all-call spans
+      // the bank. Past 16 people, the least-loaded channel takes the
+      // spillover (a shared direct key beats being unreachable).
+      const std::vector<ChannelState> asnap = bank.Snapshot();
+      const int nslots = static_cast<int>(asnap.size());
+      const auto slot_load = [&](int s) {
+        std::set<unsigned int> ids = asnap[static_cast<size_t>(s)].members;
+        for (const auto& iv : intent) {
+          if (iv.first == s) ids.insert(iv.second);
+        }
+        return static_cast<int>(ids.size());
+      };
       for (const RosterMember& m : roster.others()) {
         if (!m.supports_talkback) {
           if (warned_no_talkback.insert(m.user_id).second) {
@@ -800,29 +914,82 @@ int Run(int argc, char** argv) {
           continue;
         }
         if (auto_assigned.insert(m.user_id).second) {
-          intent.insert({0, m.user_id});
-          log_op(m.name + " -> CH 1");
+          int pick = -1, best = 1 << 30;
+          for (int s = 0; s < nslots; ++s) {
+            if (!asnap[static_cast<size_t>(s)].ready) continue;
+            const int load = slot_load(s);
+            if (load == 0) { pick = s; break; }
+            if (load < best) { best = load; pick = s; }
+          }
+          if (pick >= 0) {
+            intent.insert({pick, m.user_id});
+            log_op(m.name + " -> CH " + std::to_string(pick + 1));
+          }
         }
       }
 
-      // Heal intent against confirmed membership: invite what should be in
-      // and is not, remove what should not be and is. One pass, idempotent,
-      // and re-run every cadence so transients fix themselves.
+    }
+
+    // Membership healing on its own, faster cadence: ONE call per tick,
+    // rotated across channels -- Zoom's limiter is per CALL, so even
+    // per-channel batches fired back-to-back in one sweep draw code 18
+    // (proven live twice today: first one call per person, then one batch
+    // per channel). 600ms per call sits inside the limiter (CoreVideo's
+    // create ladder paces at 300ms) and fills an 8-person desk in ~5s;
+    // a refused person still backs off 5s..60s.
+    if (NowNs() >= next_heal_ns && bank.channels_ready() > 0) {
+      next_heal_ns = NowNs() + 600'000'000LL;
       const std::vector<ChannelState> snap = bank.Snapshot();
-      for (int s = 0; s < static_cast<int>(snap.size()); ++s) {
+      const int heal_n = static_cast<int>(snap.size());
+      bool acted = false;
+      for (int k = 0; k < heal_n && !acted; ++k) {
+        const int s = (heal_rr + k) % heal_n;
+        std::vector<unsigned int> missing;
+        std::string missing_names;
+        unsigned int to_remove = 0;
+        bool have_remove = false;
         for (const RosterMember& m : roster.others()) {
           const bool want = intent.count({s, m.user_id}) != 0;
           const bool have =
               snap[static_cast<size_t>(s)].members.count(m.user_id) != 0;
+          if (want && have) invite_backoff.erase({s, m.user_id});
           if (want && !have && m.supports_talkback) {
-            if (!bank.Invite(s, m.user_id, &err)) {
-              log_op("CH " + std::to_string(s + 1) + " invite failed: " + err);
+            const auto b = invite_backoff.find({s, m.user_id});
+            if (b == invite_backoff.end() || NowNs() >= b->second.second) {
+              missing.push_back(m.user_id);
+              if (!missing_names.empty()) missing_names += ", ";
+              missing_names += m.name;
             }
-          } else if (!want && have) {
-            if (!bank.Remove(s, m.user_id, &err)) {
-              log_op("CH " + std::to_string(s + 1) + " remove failed: " + err);
-            }
+          } else if (!want && have && !have_remove) {
+            to_remove = m.user_id;
+            have_remove = true;
           }
+        }
+        if (!missing.empty()) {
+          const bool ok = bank.InviteMany(s, missing, &err);
+          if (!ok) {
+            log_op("CH " + std::to_string(s + 1) + " invite (" + missing_names +
+                   ") failed: " + err);
+          }
+          for (const unsigned int uid : missing) {
+            auto& b = invite_backoff[{s, uid}];
+            b.first = ok ? 0 : b.first + 1;
+            // After a successful Execute the join confirmation is async;
+            // 10s of patience before re-asking. A refusal doubles from 5s.
+            const int64_t wait_ns =
+                ok ? 10'000'000'000LL
+                   : std::min<int64_t>(60'000'000'000LL,
+                                       5'000'000'000LL << std::min(b.first, 4));
+            b.second = NowNs() + wait_ns;
+          }
+          acted = true;
+          heal_rr = s + 1;
+        } else if (have_remove) {
+          if (!bank.Remove(s, to_remove, &err)) {
+            log_op("CH " + std::to_string(s + 1) + " remove failed: " + err);
+          }
+          acted = true;
+          heal_rr = s + 1;
         }
       }
     }
@@ -837,8 +1004,15 @@ int Run(int argc, char** argv) {
         aedges.swap(assign_edges);
       }
       for (const auto& [slot, on] : ledges) {
-        if (on) latch_mask |= 1u << slot;
-        else latch_mask &= ~(1u << slot);
+        if (slot < 0) {  // latch-all edge from the panel
+          latch_mask = on ? ((n_channels >= 32) ? 0xFFFFFFFFu
+                                                : ((1u << n_channels) - 1u))
+                          : 0u;
+        } else if (on) {
+          latch_mask |= 1u << slot;
+        } else {
+          latch_mask &= ~(1u << slot);
+        }
       }
       for (const auto& [slot, uid, on] : aedges) {
         if (on) intent.insert({slot, uid});
@@ -848,6 +1022,25 @@ int Run(int argc, char** argv) {
 
     // Publish the panel state. Built every tick and cheap; the server samples
     // it at its own cadence, so a slow tab costs nothing here.
+    if (ui && NowNs() >= next_dev_ns) {
+      next_dev_ns = NowNs() + 5'000'000'000LL;
+      std::string dj = "\"mics\":[";
+      bool df = true;
+      for (const auto& d : ListCaptureDevices()) {
+        if (!df) dj += ",";
+        df = false;
+        dj += "\"" + JsonEscape(d.name) + "\"";
+      }
+      dj += "],\"outs\":[";
+      df = true;
+      for (const auto& d : ListPlaybackDevices()) {
+        if (!df) dj += ",";
+        df = false;
+        dj += "\"" + JsonEscape(d.name) + "\"";
+      }
+      dj += "]";
+      dev_json = dj;
+    }
     if (ui) {
       std::string status = MeetingStatusName(zoom.status());
       for (char& c : status) {
@@ -868,6 +1061,19 @@ int Run(int argc, char** argv) {
       }
       const std::vector<ChannelState> snap = bank.Snapshot();
       const uint32_t keys = bank.key_mask();
+      // A channel whose whole population is one person is that person's
+      // direct line; its key wears their name.
+      std::map<unsigned int, std::string> names;
+      for (const RosterMember& m : roster.others()) names[m.user_id] = m.name;
+      const auto channel_label = [&](int s) -> std::string {
+        std::set<unsigned int> ids = snap[static_cast<size_t>(s)].members;
+        for (const auto& iv : intent) {
+          if (iv.first == s) ids.insert(iv.second);
+        }
+        if (ids.size() != 1) return "";
+        const auto it = names.find(*ids.begin());
+        return it == names.end() ? "" : it->second;
+      };
       std::string j = "{\"phase\":\"up\",";
       j += "\"meeting\":\"" + std::to_string(cfg.meeting_number) + "\",";
       j += "\"status\":\"" + status + "\",";
@@ -875,6 +1081,9 @@ int Run(int argc, char** argv) {
       j += std::string("\"sidetone\":") + (sidetone_on ? "true," : "false,");
       j += std::string("\"aec\":") +
            ((engine && engine->aec_enabled()) ? "true," : "false,");
+      j += std::string("\"tone\":") +
+           ((engine && engine->test_tone()) ? "true," : "false,");
+      j += std::string("\"sdkmic\":") + (zoom.SelfMuted() ? "false," : "true,");
       j += "\"gain\":" + std::to_string(static_cast<int>(gain_db)) + ",";
       char pk[32];
       std::snprintf(pk, sizeof(pk), "%.4f", peak);
@@ -882,6 +1091,13 @@ int Run(int argc, char** argv) {
       j += "\"sends\":" + std::to_string(sends) + ",";
       j += "\"underruns\":" + std::to_string(unders) + ",";
       j += "\"fails\":" + std::to_string(bank.send_failures()) + ",";
+      j += "\"chsends\":" + std::to_string(bank.channel_sends()) + ",";
+      j += "\"txpeak\":" + std::to_string(sink.tx_peak()) + ",";
+      j += "\"mic\":\"" +
+           JsonEscape(engine ? engine->capture_device_name() : "") + "\",";
+      j += "\"out\":\"" +
+           JsonEscape(engine ? engine->monitor_device_name() : "") + "\",";
+      j += dev_json + ",";
       j += "\"channels\":[";
       bool first = true;
       for (int s = 0; s < static_cast<int>(snap.size()); ++s) {
@@ -889,6 +1105,7 @@ int Run(int argc, char** argv) {
         if (!first) j += ",";
         first = false;
         j += "{\"name\":\"" + JsonEscape(c.name) + "\",";
+        j += "\"label\":\"" + JsonEscape(channel_label(s)) + "\",";
         j += std::string("\"ready\":") + (c.ready ? "true," : "false,");
         j += "\"listeners\":" + std::to_string(c.listeners) + ",";
         j += std::string("\"keyed\":") +
@@ -937,24 +1154,115 @@ int Run(int argc, char** argv) {
       }
       const int ar = aec_req.exchange(-1);
       if (ar >= 0 && engine) engine->SetAecEnabled(ar == 1);
+      const int tr = tone_req.exchange(-1);
+      if (tr >= 0 && engine) {
+        engine->SetTestTone(tr == 1);
+        log_op(tr == 1 ? "test tone ON -- replaces the mic in the live chain"
+                       : "test tone off");
+      }
       if (gain_pending.exchange(false)) {
         gain_db = static_cast<double>(gain_req.load());
         if (engine) engine->SetInputGainDb(gain_db);
       }
+      // Device switches from the settings drawer: restart the engine on the
+      // new device. A short gap in the mic is inherent to changing it.
+      std::string want_mic, want_out;
+      {
+        std::lock_guard<std::mutex> lock(dev_m);
+        want_mic.swap(mic_pending);
+        want_out.swap(out_pending);
+      }
+      if ((!want_mic.empty() || !want_out.empty()) && engine) {
+        if (!want_mic.empty()) cfg.mic_device = want_mic;
+        if (!want_out.empty()) cfg.monitor_device = want_out;
+        const bool aec_on = engine->aec_enabled();
+        engine->SetTalk(false);
+        engine->Stop();
+        EngineConfig ecfg;
+        ecfg.capture_device = cfg.mic_device;
+        ecfg.monitor_device = cfg.monitor_device;
+        ecfg.monitor_enabled = sidetone_on;
+        ecfg.input_gain_db = gain_db;
+        ecfg.aec = aec_on;
+        engine = std::make_unique<AudioEngine>(ecfg, &sink);
+        if (!engine->Start(&err)) {
+          log_op("audio device switch failed: " + err);
+        } else {
+          log_op("mic: " + engine->capture_device_name());
+        }
+      }
     }
 
-    // Keying. SPACE is all-call (every channel), the panel keys channels
-    // individually, latch is per-channel state. The bank's key mask is the
-    // single routing truth the TX path reads.
-    const bool space_down = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+    // Keying. The panel keys channels individually (digits + SPACE live in
+    // the panel window, focus-scoped); ALL CALL spans the bank; latch is
+    // per-channel state. The bank's key mask is the single routing truth
+    // the TX path reads. There is deliberately NO global keyboard hook: a
+    // GetAsyncKeyState(VK_SPACE) all-call fired while typing a space in ANY
+    // app -- an open mic to the whole panel from a chat window (owner,
+    // live 2026-08-29: "the space bar can't be the shortcut").
     const uint32_t all = (n_channels >= 32) ? 0xFFFFFFFFu
                                             : ((1u << n_channels) - 1u);
     const uint32_t keys =
-        (latch_mask | ui_talk_mask.load() | (space_down ? all : 0u)) & all;
+        (latch_mask | ui_talk_mask.load() |
+         (ui_allcall.load() ? all : 0u)) & all;
     for (int s = 0; s < n_channels; ++s) {
       bank.SetKey(s, ((keys >> s) & 1u) != 0);
     }
+    // Keying a line whose person has not landed yet (invite in flight) is
+    // the silent-failure the 15:05 live test hit: audio to nobody, no
+    // feedback. Say it, once per key-down, only for channels somebody is
+    // MEANT to be on -- all-call sweeping empty spares is normal.
+    const uint32_t newly_keyed = keys & ~prev_keys;
+    if (newly_keyed != 0) {
+      const std::vector<ChannelState> ks = bank.Snapshot();
+      for (int s = 0; s < n_channels && s < static_cast<int>(ks.size()); ++s) {
+        if (((newly_keyed >> s) & 1u) == 0) continue;
+        if (!ks[static_cast<size_t>(s)].members.empty()) continue;
+        bool meant = false;
+        for (const auto& iv : intent) {
+          if (iv.first == s) { meant = true; break; }
+        }
+        if (meant) {
+          log_op("CH " + std::to_string(s + 1) +
+                 " keyed -- nobody is in it yet (invite in flight)");
+        }
+      }
+    }
+    prev_keys = keys;
     talking = keys != 0;
+
+    // TX truth-telling, both directions: name the first moment Zoom accepts
+    // audio for each channel, and call out a transmitter that is keyed but
+    // shipping silence while the mic is live at capture -- the two halves
+    // the 15:05 no-audio hunt could not separate.
+    {
+      const uint32_t now_sent = bank.sent_mask();
+      const uint32_t new_sent = now_sent & ~prev_sent_mask;
+      if (new_sent != 0) {
+        for (int s = 0; s < n_channels; ++s) {
+          if ((new_sent >> s) & 1u) {
+            log_op("audio flowing into CH " + std::to_string(s + 1));
+          }
+        }
+        prev_sent_mask = now_sent;
+      }
+      if (talking && engine) {
+        const EngineStats es = engine->stats();
+        if (es.capture_peak > 0.03 && sink.tx_peak() < 100) {
+          if (keyed_silent_since == 0) {
+            keyed_silent_since = NowNs();
+          } else if (NowNs() - keyed_silent_since > 1'500'000'000LL) {
+            log_op("keyed but transmitting SILENCE (mic live at capture) -- "
+                   "envelope/AEC path suspect");
+            keyed_silent_since = NowNs();
+          }
+        } else {
+          keyed_silent_since = 0;
+        }
+      } else {
+        keyed_silent_since = 0;
+      }
+    }
     // The engine's envelope opens when any channel is keyed; per-channel
     // routing happens at the sink. A channel keyed mid-speech joins at full
     // level, which is how hardware panels behave.

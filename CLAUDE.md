@@ -149,6 +149,62 @@ the exe); if the download or the runtime is absent the app falls back to the
 old Edge/Chrome `--app` window. This is also the Mac-port shape: same panel
 HTML, WKWebView shell.
 
+### The talkback delivery laws (2026-08-29, a full day of live hunting)
+
+The day's no-audio mystery decomposed into three independent laws, each
+found live and each now enforced or surfaced:
+
+1. **Talkback delivers ONLY while this client's meeting audio is OPEN.**
+   Muted (e.g. mute-on-entry), `SendAudioDataToChannel` is ACCEPTED --
+   sends count, zero failures, members confirmed -- and every member hears
+   silence. Unmuting makes the same channel audible (owner-found).
+   Enforced: `UnmuteSelf` after JoinVoip + housekeeping re-open every 2s +
+   the panel's MTG MIC lamp. OPEN QUESTION: does the meeting hear the
+   SDK's captured mic device while idle-unmuted? If yes, the SDK-side mic
+   needs pointing at a dead input (ISettingService follow-up).
+2. **Talkback does not cross breakout rooms** (CoreVideo found it the same
+   morning in the same production meeting, same person: invites refused
+   `WRONG_USAGE` cross-room; and a member who IS in the channel but in
+   another room hears nothing). ZComms is not breakout-aware yet -- cells
+   should say `other room` instead of ready (TODO).
+3. **A same-account host collision hangs the join unless answered**: the
+   operator's own Zoom client hosting a meeting + ZComms ZAK-joining as
+   the same account fires `onEndOtherMeetingToJoinMeetingNotification`;
+   unanswered it hangs forever ("app isn't responding"). We Cancel(),
+   fail the join with a named local code (kFailAccountBusyElsewhere), and
+   tell the operator to leave the other meeting or join one they don't
+   host. Corollary for tests: for own-PMI sessions, let ZComms host; the
+   operator's client must NOT be in the PMI (either order collides).
+
+Diagnostic instruments built for the hunt (keep them): `chsends` (Zoom-
+accepted sends) + `sent_mask` first-audio ops lines; `txpeak` (post-
+envelope level -- separates "transmitting" from "shipping silence");
+the settings TONE toggle (700 Hz REPLACING the mic inside the live chain);
+keyed-but-empty warnings (amber ARMED key = talking to nobody). Log
+hygiene: speex warns per-frame if the AEC runs reference-starved
+(EchoCanceller bypasses until a reference frame ever arrives);
+onUserAudioStatusChange fires per mute by ANYONE (log self only); the
+console hides while the shell window is up. The AEC sidetone-reference
+self-cancellation theory was BENCHED AND REFUTED (0.4 dB at zero lag,
+pinned in test_aec) -- the sidetone reference was wrong anyway and is
+decoupled; a real far-end reference (WASAPI loopback) is future work.
+
+### Direct talk + the invite rate limit (2026-08-29, live 12-person meeting)
+
+**Zoom rate-limits back-to-back talkback calls (code 18) on INVITES too**,
+not just CreateChannel: the healer's one-batch-exchange-per-person every 2s
+drew `SDKERR_TOO_FREQUENT_CALL` on every pass. Rules now enforced in code:
+one `InviteMany` batch per channel per pass, per-(channel,person) backoff
+(5s doubling to 60s; 10s patience after a successful Execute for the async
+confirmation), prune intent/backoff when a person leaves (ids recycle).
+
+**The direct-talk model:** the full 16-channel bank is provisioned up front
+in ONE CreateChannel(16) request (keying must only SELECT); each capable
+participant auto-lands on their OWN channel so their key wears their name;
+spillover past 16 goes to the least-loaded channel; a partial grant proceeds
+after three rounds. Panel: ALL CALL + LATCH ALL (verbs `talkall`/`latchall`),
+empty spares hidden, chips = in-use channels + one spare.
+
 ### Signed-in joins: the CoreVideo auth pattern (2026-08-29)
 
 Owner rule: **no anonymous joins** -- ZComms follows CoreVideo's auth shape.

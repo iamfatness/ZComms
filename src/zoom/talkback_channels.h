@@ -56,6 +56,12 @@ class TalkbackChannels : public ZOOM_SDK_NAMESPACE::IMeetingTalkbackCtrlEvent {
 
   // Membership, by slot. Both asynchronous with response callbacks.
   bool Invite(int slot, unsigned int user_id, std::string* error);
+  // Everyone missing from a channel in ONE SDK exchange (BeginBatch/Add*N/
+  // Execute). Zoom rate-limits back-to-back talkback calls (code 18, hit
+  // live 2026-08-29 with a 12-person roster when the healer issued one
+  // invite call per person) -- the batch API exists for exactly this.
+  bool InviteMany(int slot, const std::vector<unsigned int>& user_ids,
+                  std::string* error);
   bool Remove(int slot, unsigned int user_id, std::string* error);
 
   // Keying. The mask is what SendToKeyed routes by; setting it is wait-free.
@@ -73,6 +79,11 @@ class TalkbackChannels : public ZOOM_SDK_NAMESPACE::IMeetingTalkbackCtrlEvent {
   // Snapshot for UI/state. Pump thread.
   std::vector<ChannelState> Snapshot() const;
   uint64_t send_failures() const { return send_failures_.load(); }
+  // Successful channel sends and the channels that have ever taken audio.
+  // fails=0 alone cannot distinguish "audio accepted by Zoom" from "nothing
+  // was ever sent" -- the 2026-08-29 no-audio hunt stalled on exactly that.
+  uint64_t channel_sends() const { return channel_sends_.load(); }
+  uint32_t sent_mask() const { return sent_mask_.load(); }
   std::string last_error() const;
 
   // IMeetingTalkbackCtrlEvent
@@ -111,6 +122,8 @@ class TalkbackChannels : public ZOOM_SDK_NAMESPACE::IMeetingTalkbackCtrlEvent {
   std::atomic<uint32_t> ready_mask_{0};
   std::atomic<uint32_t> key_mask_{0};
   std::atomic<uint64_t> send_failures_{0};
+  std::atomic<uint64_t> channel_sends_{0};
+  std::atomic<uint32_t> sent_mask_{0};
 };
 
 }  // namespace zc

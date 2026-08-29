@@ -101,6 +101,10 @@ std::string MeetingFailReason(int code) {
       return "the host's account does not allow outside participants";
     case MEETING_FAIL_UNABLE_TO_JOIN_EXTERNAL_MEETING:
       return "this account is not allowed to join external meetings";
+    case ZoomClient::kFailAccountBusyElsewhere:
+      return "your Zoom account is in a meeting on another device -- ZComms "
+             "joins as you; leave that meeting first (or join one you are "
+             "not hosting)";
     default: return "code " + std::to_string(code);
   }
 }
@@ -341,6 +345,14 @@ bool ZoomClient::LeaveVoip(std::string* error) {
   return true;
 }
 
+bool ZoomClient::SelfMuted() {
+  if (meeting_ == nullptr) return false;
+  IMeetingParticipantsController* parts =
+      meeting_->GetMeetingParticipantsController();
+  IUserInfo* self = parts != nullptr ? parts->GetMySelfUser() : nullptr;
+  return self != nullptr && self->IsAudioMuted();
+}
+
 bool ZoomClient::UnmuteSelf(std::string* error) {
   if (meeting_ == nullptr) {
     *error = "no meeting service";
@@ -508,8 +520,19 @@ void ZoomClient::onWebinarNeedRegisterNotification(
   std::printf("[sdk] this webinar requires registration -- cannot join\n");
 }
 void ZoomClient::onEndOtherMeetingToJoinMeetingNotification(
-    IEndOtherMeetingToJoinMeetingHandler*) {
-  std::printf("[sdk] SDK says another meeting is in progress\n");
+    IEndOtherMeetingToJoinMeetingHandler* handler) {
+  // ZComms joins AS the signed-in operator (ZAK), so if that account is
+  // already hosting a meeting elsewhere -- their own Zoom client in their
+  // PMI, live 2026-08-29 -- the SDK asks "end the other meeting to join?".
+  // Unanswered, the join hangs FOREVER, which read as "the app isn't
+  // responding". Never end the operator's own meeting out from under them:
+  // Cancel, fail the join, and say why. The status stores a code the Join
+  // wait turns into operator language.
+  std::printf("[sdk] this account is already in a meeting elsewhere -- "
+              "declining to end it; join cancelled\n");
+  if (handler != nullptr) handler->Cancel();
+  last_fail_code_.store(kFailAccountBusyElsewhere);
+  status_.store(MEETING_STATUS_FAILED);
 }
 void ZoomClient::onWebinarNeedInputScreenName(IWebinarInputScreenNameHandler*) {
   std::printf("[sdk] webinar wants a screen name prompt\n");
@@ -593,12 +616,21 @@ void ZoomClient::onUserAudioStatusChange(IList<IUserAudioStatus*>* list,
                                   "unmuted-by-host", "muted-all",
                                   "unmuted-all"};
   static const char* kType[] = {"NONE", "VOIP", "PHONE", "UNKNOWN"};
+  // Per-user, per-event: in a live meeting this callback fires on every
+  // mute/unmute by ANYONE, with the whole affected list -- printed, that
+  // was a console scroll storm ("logs are going crazy", owner, live
+  // 2026-08-29). Log ONLY this client's own transitions; everyone else's
+  // mute state is roster noise this station does not act on.
   for (int i = 0; i < list->GetCount(); ++i) {
     IUserAudioStatus* s = list->GetItem(i);
     if (s == nullptr) continue;
+    IMeetingParticipantsController* pc =
+        meeting_ ? meeting_->GetMeetingParticipantsController() : nullptr;
+    IUserInfo* self = pc ? pc->GetMySelfUser() : nullptr;
+    if (self == nullptr || s->GetUserId() != self->GetUserID()) continue;
     const int st = static_cast<int>(s->GetStatus());
     const int ty = static_cast<int>(s->GetAudioType());
-    std::printf("[audio] user %u status=%s type=%s\n", s->GetUserId(),
+    std::printf("[audio] self status=%s type=%s\n",
                 (st >= 0 && st <= 6) ? kStatus[st] : "?",
                 (ty >= 0 && ty <= 3) ? kType[ty] : "?");
   }

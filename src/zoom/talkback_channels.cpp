@@ -129,6 +129,39 @@ bool TalkbackChannels::Invite(int slot, unsigned int user_id,
   return true;
 }
 
+bool TalkbackChannels::InviteMany(int slot,
+                                  const std::vector<unsigned int>& user_ids,
+                                  std::string* error) {
+  if (user_ids.empty()) return true;
+  std::string id;
+  {
+    std::lock_guard<std::mutex> lock(m_);
+    if (slot < 0 || slot >= static_cast<int>(channels_.size()) ||
+        !channels_[static_cast<size_t>(slot)].ready) {
+      *error = "channel not ready";
+      return false;
+    }
+    if (channels_[static_cast<size_t>(slot)].members.size() + user_ids.size() >
+        static_cast<size_t>(kMaxMembers)) {
+      *error = "channel would exceed 10 members";
+      return false;
+    }
+    id = channels_[static_cast<size_t>(slot)].id;
+  }
+  const std::wstring idw = Widen(id);
+  SDKError err = controller_->BeginBatchInviteUsers(idw.c_str());
+  for (size_t i = 0; i < user_ids.size() && err == SDKERR_SUCCESS; ++i) {
+    err = controller_->AddUserToInvite(user_ids[i]);
+  }
+  if (err == SDKERR_SUCCESS) err = controller_->ExecuteBatchInviteUsers();
+  if (err != SDKERR_SUCCESS) {
+    *error = "code " + std::to_string(static_cast<int>(err)) +
+             (static_cast<int>(err) == 18 ? " (rate limited)" : "");
+    return false;
+  }
+  return true;
+}
+
 bool TalkbackChannels::Remove(int slot, unsigned int user_id,
                               std::string* error) {
   std::string id;
@@ -189,6 +222,8 @@ int TalkbackChannels::SendToKeyed(const int16_t* pcm, int samples) {
         kSampleRate, ZoomSDKAudioChannel_Mono);
     if (err == SDKERR_SUCCESS) {
       ++sent;
+      channel_sends_.fetch_add(1);
+      sent_mask_.fetch_or(1u << i);
     } else {
       send_failures_.fetch_add(1);
     }
