@@ -9,6 +9,7 @@ int main() {
   TestFrameAccumulator();
   TestSampleRing();
   TestFrameRing();
+  TestAec();
 
   const auto& failures = zctest::Failures();
   std::printf("\n");

@@ -178,10 +178,13 @@ even that (Spike C).
 
 ## Design constraints that are load-bearing
 
-- **Feeding raw PCM to the SDK's virtual mic bypasses Zoom's echo
-  cancellation.** An operator on speakers echoes into the meeting for everyone.
-  This is ship-blocking, not polish: mandate headsets with device detection, or
-  carry an AEC. Plan §2.
+- **Feeding raw PCM into Zoom bypasses its echo cancellation** (plan §2), so
+  ZComms carries its own: speexdsp MDF in `src/audio/aec`, first stage on
+  every capture frame, referenced against the engine's own monitor output
+  (post-fader). Unit-proven: **40.6 dB ERLE** on a synthetic 40 ms / −6 dB
+  acoustic path, 0.4 dB near-end impact, exact bypass. On by default;
+  `--no-aec` / panel "ECHO CANCEL" toggle. Live-room verification with real
+  speakers still worth one session; headsets remain best practice.
 - **`send()` is legal only between `onMicStartSend` and `onMicStopSend`.** Hold
   the sender pointer from `onMicInitialize` until `onMicUninitialized` and gate
   every call on the window. Plan §6.1.

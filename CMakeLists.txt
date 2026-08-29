@@ -4,7 +4,7 @@
 # no shell, no UI, no packaging. What lives here is the engine (plan §6.1-6.3),
 # the Zoom binding for it, and the Spike A harness that seeded both.
 cmake_minimum_required(VERSION 3.20)
-project(zcomms LANGUAGES CXX)
+project(zcomms LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,6 +15,28 @@ endif()
 
 set(ZOOM_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/zoom-sdk")
 set(MINIAUDIO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio")
+
+# ---------------------------------------------------------------------------
+# speexdsp -- the acoustic echo canceller (plan §2: raw PCM into Zoom
+# bypasses its AEC, so we carry our own). Vendored source, BSD-licensed,
+# floating point, kiss FFT. Only the echo/preprocess units are built.
+# ---------------------------------------------------------------------------
+add_library(speexdsp STATIC
+  third_party/speexdsp/libspeexdsp/mdf.c
+  third_party/speexdsp/libspeexdsp/preprocess.c
+  third_party/speexdsp/libspeexdsp/filterbank.c
+  third_party/speexdsp/libspeexdsp/fftwrap.c
+  third_party/speexdsp/libspeexdsp/kiss_fft.c
+  third_party/speexdsp/libspeexdsp/kiss_fftr.c
+)
+target_include_directories(speexdsp PUBLIC third_party/speexdsp/include)
+target_include_directories(speexdsp PRIVATE third_party/speexdsp/libspeexdsp)
+target_compile_definitions(speexdsp PRIVATE
+  FLOATING_POINT USE_KISS_FFT EXPORT= HAVE_STDINT_H)
+if(MSVC)
+  target_compile_options(speexdsp PRIVATE /W0 /utf-8)
+  target_compile_definitions(speexdsp PRIVATE _USE_MATH_DEFINES _CRT_SECURE_NO_WARNINGS)
+endif()
 
 # ---------------------------------------------------------------------------
 # zcomms_audio -- the engine. Knows nothing about Zoom.
@@ -33,6 +55,7 @@ add_library(zcomms_audio STATIC
   src/audio/envelope.cpp
   src/audio/limiter.cpp
   src/audio/frame_accumulator.cpp
+  src/audio/aec.cpp
   src/audio/devices.cpp
   src/audio/loopback.cpp
   src/audio/wav_sink.cpp
@@ -40,6 +63,7 @@ add_library(zcomms_audio STATIC
   src/audio/miniaudio_impl.cpp
 )
 target_include_directories(zcomms_audio PUBLIC src/audio "${MINIAUDIO_DIR}")
+target_link_libraries(zcomms_audio PUBLIC speexdsp)
 
 # PUBLIC, and set here rather than in a source file: these macros change the
 # layout of ma_device and ma_device_config, so a translation unit that sees
@@ -133,6 +157,7 @@ add_executable(zcomms_audio_tests
   tests/audio/test_frame_accumulator.cpp
   tests/audio/test_sample_ring.cpp
   tests/audio/test_frame_ring.cpp
+  tests/audio/test_aec.cpp
 )
 target_link_libraries(zcomms_audio_tests PRIVATE zcomms_audio)
 target_include_directories(zcomms_audio_tests PRIVATE tests/audio)

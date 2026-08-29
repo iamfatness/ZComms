@@ -63,6 +63,7 @@ struct AppConfig {
   std::string monitor_device;  // sidetone output, substring match
   double gain_db = 0.0;
   bool sidetone = true;
+  bool aec = true;
   // Start with talk latched on. For unattended verification, and for an
   // operator who wants an open channel rather than PTT.
   bool start_latched = false;
@@ -247,6 +248,7 @@ int Run(int argc, char** argv) {
     else if (a == "--in") cfg.mic_device = next("--in");
     else if (a == "--out") cfg.monitor_device = next("--out");
     else if (a == "--no-sidetone") cfg.sidetone = false;
+    else if (a == "--no-aec") cfg.aec = false;
     else if (a == "--gain") cfg.gain_db = std::atof(next("--gain"));
     else if (a == "--latch") cfg.start_latched = true;
     else if (a == "--test-signal") cfg.test_signal = true;
@@ -382,6 +384,7 @@ int Run(int argc, char** argv) {
     ecfg.monitor_device = cfg.monitor_device;
     ecfg.monitor_enabled = cfg.sidetone;
     ecfg.input_gain_db = cfg.gain_db;
+    ecfg.aec = cfg.aec;
     engine = std::make_unique<AudioEngine>(ecfg, &sink);
     if (!engine->Start(&err)) {
       std::printf("ERROR: %s\n", err.c_str());
@@ -406,7 +409,7 @@ int Run(int argc, char** argv) {
   // Per-channel: bit i of ui_talk_mask = the panel holds CH i+1's key; latch
   // likewise but applied as edges. assign requests carry "<slot>:<uid> on".
   std::atomic<uint32_t> ui_talk_mask{0};
-  std::atomic<int> side_req{-1};
+  std::atomic<int> side_req{-1}, aec_req{-1};
   std::atomic<int> gain_req{0};
   std::atomic<bool> gain_pending{false};
   std::atomic<bool> quit_req{false};
@@ -447,6 +450,8 @@ int Run(int argc, char** argv) {
             }
           } else if (verb == "sidetone") {
             side_req.store(a1 == "on" ? 1 : 0);
+          } else if (verb == "aec") {
+            aec_req.store(a1 == "on" ? 1 : 0);
           } else if (verb == "gain") {
             gain_req.store(std::atoi(a1.c_str()));
             gain_pending.store(true);
@@ -591,6 +596,8 @@ int Run(int argc, char** argv) {
       j += "\"status\":\"" + status + "\",";
       j += std::string("\"talking\":") + (talking ? "true," : "false,");
       j += std::string("\"sidetone\":") + (sidetone_on ? "true," : "false,");
+      j += std::string("\"aec\":") +
+           ((engine && engine->aec_enabled()) ? "true," : "false,");
       j += "\"gain\":" + std::to_string(static_cast<int>(gain_db)) + ",";
       char pk[32];
       std::snprintf(pk, sizeof(pk), "%.4f", peak);
@@ -651,6 +658,8 @@ int Run(int argc, char** argv) {
         sidetone_on = sr == 1;
         if (engine) engine->SetSidetoneEnabled(sidetone_on);
       }
+      const int ar = aec_req.exchange(-1);
+      if (ar >= 0 && engine) engine->SetAecEnabled(ar == 1);
       if (gain_pending.exchange(false)) {
         gain_db = static_cast<double>(gain_req.load());
         if (engine) engine->SetInputGainDb(gain_db);

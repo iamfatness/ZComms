@@ -28,6 +28,7 @@
 #include <memory>
 #include <string>
 
+#include "aec.h"
 #include "devices.h"
 #include "envelope.h"
 #include "frame_accumulator.h"
@@ -50,6 +51,13 @@ struct EngineConfig {
   // 12 ms is inaudible as a fade but fast enough that a press does not feel
   // laggy. Plan §5 is the reason this is a ramp at all.
   double ptt_fade_ms = 12.0;
+
+  // Acoustic echo cancellation (plan §2, the ship-blocker): cancel what our
+  // own monitor output leaks back into the microphone. On by default when a
+  // monitor is open, because the failure mode -- the operator's monitor in
+  // every panelist's ear -- is discovered by the panelists, not the operator.
+  bool aec = true;
+  int aec_tail_ms = 200;
 
   double limiter_ceiling_dbfs = -1.0;
   double limiter_lookahead_ms = 2.0;
@@ -89,6 +97,8 @@ class AudioEngine {
   void SetInputGainDb(double db);
   void SetSidetoneDb(double db);
   void SetSidetoneEnabled(bool on);
+  void SetAecEnabled(bool on);
+  bool aec_enabled() const;
 
   const std::string& capture_device_name() const;
   const std::string& monitor_device_name() const;
@@ -113,6 +123,7 @@ class AudioEngine {
   PacerStats final_pacer_;
 
   FrameAccumulator accum_;
+  std::unique_ptr<EchoCanceller> aec_;
   SmoothedGain gain_;
   Limiter limiter_;
   Envelope ptt_;
