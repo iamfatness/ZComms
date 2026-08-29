@@ -68,6 +68,7 @@ void EchoCanceller::FeedPlayback(const float* samples, int count) {
     if (impl_->play_partial.size() == static_cast<size_t>(frame_samples_)) {
       speex_echo_playback(impl_->echo, impl_->play_partial.data());
       impl_->play_partial.clear();
+      reference_live_ = true;
     }
   }
 }
@@ -75,6 +76,13 @@ void EchoCanceller::FeedPlayback(const float* samples, int count) {
 void EchoCanceller::ProcessCapture(float* frame) {
   std::lock_guard<std::mutex> lock(m_);
   if (!enabled_ || impl_->echo == nullptr) return;
+  // With no reference ever fed there is nothing to cancel, and running
+  // speex_echo_capture against an empty playback queue makes speexdsp print
+  // "No playback frame available (your application is buggy...)" to stderr
+  // ONCE PER FRAME -- 50 lines a second of console storm the moment the
+  // engine stopped feeding the (wrong) sidetone reference (live
+  // 2026-08-29). No reference = clean bypass, silently.
+  if (!reference_live_) return;
   for (int i = 0; i < frame_samples_; ++i) {
     const float v = std::max(-1.0f, std::min(1.0f, frame[i]));
     impl_->mic_buf[static_cast<size_t>(i)] =

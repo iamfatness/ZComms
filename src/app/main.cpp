@@ -485,7 +485,15 @@ int Run(int argc, char** argv) {
         shown = StartShellWindow(url, 1000, 640,
                                  [&quit_req]() { quit_req.store(true); });
 #endif
-        if (!shown) OpenAppWindow(url);
+        if (!shown) {
+          OpenAppWindow(url);
+        } else {
+          // The panel is the app; the console is a diagnostic stream, not
+          // a second face. Live 2026-08-29 ("logs are going crazy"): the
+          // SDK's per-event chatter scrolling next to the panel read as a
+          // malfunction. Headless runs keep the console.
+          ShowWindow(GetConsoleWindow(), SW_HIDE);
+        }
       }
     } else {
       std::printf("WARNING: %s -- running without the panel\n", ui_err.c_str());

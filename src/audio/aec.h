@@ -50,6 +50,10 @@ class EchoCanceller {
   std::unique_ptr<Impl> impl_;
   std::mutex m_;
   bool enabled_ = true;
+  // True once a full reference frame has been fed. Until then ProcessCapture
+  // bypasses: cancelling against nothing is a no-op that costs a per-frame
+  // speexdsp stderr warning (see the note at the check).
+  bool reference_live_ = false;
   int frame_samples_;
 };
 

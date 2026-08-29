@@ -593,12 +593,21 @@ void ZoomClient::onUserAudioStatusChange(IList<IUserAudioStatus*>* list,
                                   "unmuted-by-host", "muted-all",
                                   "unmuted-all"};
   static const char* kType[] = {"NONE", "VOIP", "PHONE", "UNKNOWN"};
+  // Per-user, per-event: in a live meeting this callback fires on every
+  // mute/unmute by ANYONE, with the whole affected list -- printed, that
+  // was a console scroll storm ("logs are going crazy", owner, live
+  // 2026-08-29). Log ONLY this client's own transitions; everyone else's
+  // mute state is roster noise this station does not act on.
   for (int i = 0; i < list->GetCount(); ++i) {
     IUserAudioStatus* s = list->GetItem(i);
     if (s == nullptr) continue;
+    IMeetingParticipantsController* pc =
+        meeting_ ? meeting_->GetMeetingParticipantsController() : nullptr;
+    IUserInfo* self = pc ? pc->GetMySelfUser() : nullptr;
+    if (self == nullptr || s->GetUserId() != self->GetUserID()) continue;
     const int st = static_cast<int>(s->GetStatus());
     const int ty = static_cast<int>(s->GetAudioType());
-    std::printf("[audio] user %u status=%s type=%s\n", s->GetUserId(),
+    std::printf("[audio] self status=%s type=%s\n",
                 (st >= 0 && st <= 6) ? kStatus[st] : "?",
                 (ty >= 0 && ty <= 3) ? kType[ty] : "?");
   }
