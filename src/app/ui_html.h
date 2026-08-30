@@ -112,6 +112,8 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
 .hmeter i.mid{background:var(--idle)} .hmeter i.mid.on{background:var(--amber)}
 .hmeter i.cap{background:#3A2020} .hmeter i.cap.on{background:var(--red)}
 .hint{font:10px var(--mono);color:var(--dim);letter-spacing:.04em}
+.deskmsg{font:12px var(--mono);color:var(--legend);letter-spacing:.08em;
+  padding:26px 0}
 /* settings drawer */
 .drawer{display:none;border-top:1px solid var(--scribe);background:var(--panel);
   padding:18px 22px}
@@ -174,6 +176,7 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
       <button class="tog on" id="joinbtn">CONNECT</button>
     </div>
     <button class="key allkey" id="allkey" style="display:none" aria-pressed="false">ALL CALL</button>
+    <div class="deskmsg" id="deskmsg" style="display:none">in the meeting · loading participants…</div>
     <div class="grid" id="grid"></div>
     <ul class="editlist" id="editlist"></ul>
     <div class="hint" id="deskhint" style="display:none">hold a cell to talk · digits 1–9 direct · space = all call · latch mode makes presses stick</div>
@@ -384,6 +387,7 @@ function render(){
   const idle=S.phase!=='up';
   $('joincard').classList.toggle('show',idle);
   $('allkey').style.display=idle?'none':'';
+  if(idle)$('deskmsg').style.display='none';
   $('grid').style.display=(idle||editMode)?'none':'grid';
   $('editlist').classList.toggle('show',!idle&&editMode);
   $('deskhint').style.display=idle?'none':'';
@@ -420,6 +424,15 @@ function render(){
   allkey.classList.toggle('armed',!!allKeyed&&!anyHearing);
   allkey.setAttribute('aria-pressed',!!allKeyed);
   updateGrid();
+  // Between "in the meeting" and the first person landing, say so rather
+  // than presenting an empty desk as a mystery.
+  const anyCells=cells.length>0;
+  $('deskmsg').style.display=(!editMode&&!anyCells)?'':'none';
+  if(!anyCells){
+    $('deskmsg').textContent=(S.roster||[]).length
+      ?'in the meeting · channels forming…'
+      :'in the meeting · waiting for participants…';
+  }
   /* edit-talent list */
   if(editMode){
     const r=$('editlist');r.innerHTML='';

@@ -710,6 +710,10 @@ int Run(int argc, char** argv) {
     return -1;
   }
   std::printf("[zoom] in the meeting\n");
+  // The stretch between "joined" and "desk ready" (channel creation, roster
+  // load, invites) used to render as a blank panel -- say what is happening
+  // at each stage instead (owner, 2026-08-30).
+  publish_phase("joining", "IN THE MEETING -- SETTING UP");
   if (!zoom.JoinVoip(&err)) {
     std::printf("WARNING: %s\n", err.c_str());
   }
@@ -804,8 +808,16 @@ int Run(int argc, char** argv) {
         std::printf("[talkback] %s\n", err.c_str());
       }
     }
+    int last_ready = -1;
     for (int i = 0; i < 100 && bank.channels_ready() < n_channels; ++i) {
       zoom.Pump(100);
+      const int ready_now = bank.channels_ready();
+      if (ready_now != last_ready) {
+        last_ready = ready_now;
+        publish_phase("joining", "IN THE MEETING -- CHANNELS " +
+                                     std::to_string(ready_now) + "/" +
+                                     std::to_string(n_channels));
+      }
     }
     // The promote-retry wait is also cancellable -- this loop can sit for
     // ten minutes if nobody grants the role, and the operator needs an
