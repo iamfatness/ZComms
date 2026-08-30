@@ -201,9 +201,14 @@ add_executable(zcomms_audio_tests
   tests/audio/test_sample_ring.cpp
   tests/audio/test_frame_ring.cpp
   tests/audio/test_aec.cpp
+  tests/zoom/test_room_plan.cpp
+  src/zoom/room_plan.cpp
 )
 target_link_libraries(zcomms_audio_tests PRIVATE zcomms_audio)
-target_include_directories(zcomms_audio_tests PRIVATE tests/audio)
+# src/zoom on the include path for the SDK-FREE zoom headers only
+# (room_plan.h, reach.h); anything including SDK headers stays out of this
+# target -- it links no sdk.lib.
+target_include_directories(zcomms_audio_tests PRIVATE tests/audio src/zoom)
 if(MSVC)
   target_compile_options(zcomms_audio_tests PRIVATE /W4 /permissive- /utf-8)
 endif()

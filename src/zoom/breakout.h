@@ -22,22 +22,12 @@
 #include <vector>
 
 #include "meeting_service_components/meeting_breakout_rooms_interface_v2.h"
+// BreakoutRoomInfo/BreakoutState live in the SDK-free room_plan.h so the
+// planner and its tests compile without sdk.lib; SDK-free headers may be
+// included from SDK-including ones, never the reverse.
+#include "room_plan.h"
 
 namespace zc {
-
-struct BreakoutRoomInfo {
-  std::string id;
-  std::string name;
-  std::vector<std::string> user_names;
-};
-
-struct BreakoutState {
-  bool enabled = false;
-  bool started = false;
-  bool in_bo = false;
-  std::string my_room;  // empty = the main session
-  std::vector<BreakoutRoomInfo> rooms;
-};
 
 class BreakoutRooms : public ZOOM_SDK_NAMESPACE::IMeetingBOControllerEvent {
  public:

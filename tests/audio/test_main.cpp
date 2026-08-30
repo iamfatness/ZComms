@@ -10,6 +10,7 @@ int main() {
   TestSampleRing();
   TestFrameRing();
   TestAec();
+  TestRoomPlan();
 
   const auto& failures = zctest::Failures();
   std::printf("\n");
