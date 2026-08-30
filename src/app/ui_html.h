@@ -208,6 +208,7 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
     <button class="tog" id="latchmode">LATCH</button>
     <button class="tog" id="editbtn">EDIT TALENT</button>
     <button class="tog" id="setbtn">SETTINGS</button>
+    <button class="tog" id="leavebtn" title="leave the meeting, keep the app">LEAVE</button>
     <div class="hmeter" id="hmeter" title="mic level"></div>
   </div>
   <div class="ops" id="ops"><span>panel ready — waiting for the station…</span></div>
@@ -365,10 +366,12 @@ const micsig={v:''},outsig={v:''},roomsig={v:''};
 const needPass=()=>S.phase==='joining'&&/PASSCODE/.test(S.status||'');
 const joinNow=()=>{
   if(S.phase==='signin'){act('signin','');$('joinstate').textContent='browser opened — approve zcomms there';return;}
+  if(S.phase==='joining'&&!needPass()){act('leave','');$('joinstate').textContent='cancelling…';return;}
   const v=$('joinurl').value.trim();
   if(!v)return;
   if(needPass()){act('passcode',v);$('joinurl').value='';$('joinstate').textContent='checking…';}
   else{act('join',v);$('joinstate').textContent='connecting…';}};
+$('leavebtn').onclick=()=>act('leave','');
 $('joinbtn').onclick=joinNow;
 $('joinurl').addEventListener('keydown',e=>{if(e.key==='Enter')joinNow();});
 
@@ -398,7 +401,8 @@ function render(){
       signin?'SIGN IN WITH ZOOM':'JOIN A MEETING';
     $('joinurl').placeholder=pass?'meeting passcode'
                                  :'https://zoom.us/j/…  or meeting ID';
-    $('joinbtn').textContent=signin?'SIGN IN':(pass?'SUBMIT':'CONNECT');
+    $('joinbtn').textContent=signin?'SIGN IN'
+      :(pass?'SUBMIT':(S.phase==='joining'?'CANCEL':'CONNECT'));
     $('meet').textContent=S.status||'—';
     ['led-link','led-mic','led-ch','led-tx'].forEach(i=>$(i).classList.remove('on'));
     return;

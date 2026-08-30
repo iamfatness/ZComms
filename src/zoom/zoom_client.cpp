@@ -233,7 +233,7 @@ bool ZoomClient::Authenticate(const std::string& public_app_key,
 
 bool ZoomClient::Join(uint64_t meeting_number, const std::string& password,
                       const std::string& display_name, int timeout_ms,
-                      std::string* error, const std::function<void()>& on_tick,
+                      std::string* error, const std::function<bool()>& on_tick,
                       const std::string& zak) {
   if (CreateMeetingService(&meeting_) != SDKERR_SUCCESS || meeting_ == nullptr) {
     *error = "CreateMeetingService failed";
@@ -276,7 +276,11 @@ bool ZoomClient::Join(uint64_t meeting_number, const std::string& password,
   const int64_t deadline = NowNs() + static_cast<int64_t>(timeout_ms) * 1'000'000;
   while (NowNs() < deadline) {
     Pump(100);
-    if (on_tick) on_tick();
+    if (on_tick && !on_tick()) {
+      *error = "join cancelled";
+      Leave();
+      return false;
+    }
     const MeetingStatus s = status_.load();
     if (s == MEETING_STATUS_INMEETING) return true;
     if (s == MEETING_STATUS_FAILED) {

@@ -383,6 +383,7 @@ int Run(int argc, char** argv) {
   std::atomic<int> gain_req{0};
   std::atomic<bool> gain_pending{false};
   std::atomic<bool> quit_req{false};
+  std::atomic<bool> leave_req{false};  // leave the meeting, keep the app
   std::mutex edge_m;
   std::vector<std::pair<int, bool>> latch_edges;
   std::vector<std::tuple<int, unsigned int, bool>> assign_edges;
@@ -485,6 +486,8 @@ int Run(int argc, char** argv) {
           } else if (verb == "signout") {
             oauth.SignOut();
             signed_in.store(false);
+          } else if (verb == "leave") {
+            leave_req.store(true);
           } else if (verb == "quit") {
             quit_req.store(true);
           }
@@ -659,7 +662,7 @@ int Run(int argc, char** argv) {
   int last_pc_state = 0;
   ZOOM_SDK_NAMESPACE::MeetingStatus last_js =
       ZOOM_SDK_NAMESPACE::MEETING_STATUS_IDLE;
-  const auto join_tick = [&]() {
+  const auto join_tick = [&]() -> bool {
     // Mirror real SDK status to the panel; "ADMIT..." while the SDK sits in
     // WAITING_FOR_HOST reads as a hang from the operator's chair.
     const ZOOM_SDK_NAMESPACE::MeetingStatus js = zoom.status();
@@ -691,10 +694,18 @@ int Run(int argc, char** argv) {
         zoom.SubmitPasscode(p);
       }
     }
+    // false aborts the join: the panel's LEAVE/CANCEL is the operator's
+    // exit from a stuck waiting room -- killing the app was the only way
+    // out before (owner, 2026-08-30).
+    return !leave_req.load() && !quit_req.load();
   };
   if (!zoom.Join(cfg.meeting_number, cfg.meeting_password, cfg.display_name,
                  600000, &err, join_tick, zak)) {
-    log_op("could not join: " + err);
+    if (leave_req.exchange(false)) {
+      log_op("join cancelled");
+    } else {
+      log_op("could not join: " + err);
+    }
     zoom.Cleanup();
     return -1;
   }
@@ -795,6 +806,15 @@ int Run(int argc, char** argv) {
     }
     for (int i = 0; i < 100 && bank.channels_ready() < n_channels; ++i) {
       zoom.Pump(100);
+    }
+    // The promote-retry wait is also cancellable -- this loop can sit for
+    // ten minutes if nobody grants the role, and the operator needs an
+    // exit that is not killing the app.
+    if (leave_req.exchange(false) || quit_req.load()) {
+      log_op("left the meeting");
+      zoom.Leave();
+      zoom.Cleanup();
+      return quit_req.load() ? 0 : -1;
     }
     created = bank.channels_ready() >= n_channels;
     // A meeting may grant fewer than the full bank; a partial bank is a
@@ -935,7 +955,7 @@ int Run(int argc, char** argv) {
     }
   });
 
-  while (!quit && zoom.in_meeting()) {
+  while (!quit && zoom.session_alive()) {
     if (end_ns != 0 && NowNs() >= end_ns) break;
     heartbeat_ns.store(NowNs());
     zoom.Pump(30);
@@ -1443,6 +1463,11 @@ int Run(int argc, char** argv) {
 
     // Apply remaining control-surface edges.
     if (quit_req.load()) quit = true;
+    if (leave_req.exchange(false)) {
+      // Leave the meeting, keep the app: break to teardown; the session
+      // cycle returns to the join card.
+      break;
+    }
     {
       const int sr = side_req.exchange(-1);
       if (sr >= 0) {
