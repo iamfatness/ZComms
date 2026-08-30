@@ -186,6 +186,25 @@ found live and each now enforced or surfaced:
    host. Corollary for tests: for own-PMI sessions, let ZComms host; the
    operator's client must NOT be in the PMI (either order collides).
 
+Two more laws adopted 2026-08-30 from CoreVideo's live measurements (same
+production; both cost real debugging there):
+
+4. **Zoom DUCKS a channel member's meeting audio BY DEFAULT** -- merely
+   being placed in a talkback channel reduces their meeting volume, and
+   talent reported the drop on mere assignment. `SetChannelBackgroundVolume`
+   is a channel-scoped 0.0-2.0 gain (1.0 = unity; one call covers late
+   joiners). Enforced by `src/zoom/duck_plan.{h,cpp}` (pure, unit-tested):
+   unity the moment each channel is ready, duck (0.2) only while that
+   channel is keyed, one paced SDK call per pass (the per-call rate limit
+   applies to volume calls too), refusals retried with backoff. This
+   replaced the old permanent `SetBackgroundVolumeAll(0.2f)` at bring-up,
+   which had every member's meeting audio at 20% for the whole session.
+5. **`SendAudioDataToChannel` is MONO ONLY.** `ZoomSDKAudioChannel_Stereo`
+   returns `SDKERR_SUCCESS` and delivers NOTHING audible; the header's
+   "mono or stereo" claim lies. Our whole chain is mono by construction --
+   if a stereo source ever arrives (extern program feeds are on the
+   roadmap), downmix before the SDK boundary, never declare stereo.
+
 Diagnostic instruments built for the hunt (keep them): `chsends` (Zoom-
 accepted sends) + `sent_mask` first-audio ops lines; `txpeak` (post-
 envelope level -- separates "transmitting" from "shipping silence");
@@ -229,10 +248,16 @@ events (host restricting chat = fallback path down, one ops line per
 transition), and best-effort deletes its OWN echoed signaling messages --
 **the SDK has no invisible/data-only chat; a receiver's stock client may
 render inbound protocol lines** (private messages are at least invisible to
-third parties). App: verbs `cue <slot> on|off` and `notify <slot>`;
-auto-assignment sends a private human notice to each talent ("you are on
-talkback CH n"); talkback-unsupported / channel-creation-failure broadcasts
-a `fallback` signal before leaving. onChatMsgNotification's `content`
+third parties). App: verbs `cue <slot> on|off` and `notify <slot>`.
+**The bring-up is silent by default (2026-08-30, owner ruling):** the
+auto-assignment courtesy chat ("you are on talkback CH n") is OPT-IN via
+`--announce` -- fired automatically it messaged an entire production's
+meeting, audience included (Office Hours, 2026-08-30). The panel's explicit
+`notify <slot>` verb works regardless. The `fallback` signal is likewise no
+longer To_All: it goes only to known peer desks (senders whose chat decoded
+as ours -- `ChatSignals::peers_`); with no peers it sends nothing, because
+a stock client renders inbound `~ZC1~` lines and a non-desk gains nothing
+from seeing one. onChatMsgNotification's `content`
 param is documented "currently invalid" -- use IChatMsgInfo::GetContent().
 Live checklist NOT yet run (needs a meeting + a second desk for the
 cue leg): notify renders only in the target client; desk-to-desk cue logs
@@ -281,6 +306,36 @@ room-scoped and backoff like invites; the station's own BO-instance ghost
 (same display name, fresh id) is never auto-assigned. NOT yet verified:
 bo layout/apply/start against our own rooms, cross-room audio realign
 delivery, the chat-notify visual on a stock client.
+
+### Shared intercom roadmap with CoreVideo (owner, 2026-08-30)
+
+Zoom is the LAST MILE of a real intercom. CoreVideo is building the OBS
+side; ZComms aligns its channel model where it overlaps rather than
+diverging. The target shapes:
+
+- **Party-line (PL) channels with multiple members** -- named group lines,
+  not just per-person privates.
+- **Extern feeds latched into a channel** -- another comms system's mix
+  carried into a talkback channel. (Extern sources may be stereo: mono
+  law #5 says downmix at the boundary.)
+- **Director PTT barges over a latched feed**: while keyed, the latched
+  feed ducks ~30% under the director's voice (**decision B**). This is
+  in-channel mixing on our side, distinct from law #4's meeting-audio duck.
+- **Per-person private channels become OPT-IN, not automatic (decision A)**
+  -- frees channel budget (16 hard cap) for PLs. Today's auto-assign-
+  everyone-a-channel default will need a policy flag when PLs land; the
+  silent bring-up (`--announce` off) is the first step in that direction.
+
+Two SDK unknowns NEITHER project has probed -- resolve before building on
+either assumption:
+
+1. **Can one user be a member of two channels simultaneously?** Needed for
+   PL + private overlap. Probe: invite the same uid into two channels,
+   watch both join callbacks, key each and verify delivery.
+2. **What does the invitee's stock Zoom client DISPLAY on channel invite /
+   membership?** Audit from the receiving side -- if Zoom itself shows a
+   banner or toast, that bounds how quiet bring-up can ever be, no matter
+   what we do about chat.
 
 ### Signed-in joins: the CoreVideo auth pattern (2026-08-29)
 

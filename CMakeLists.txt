@@ -100,6 +100,7 @@ if(EXISTS "${ZOOM_SDK_DIR}/lib/sdk.lib")
     src/zoom/signal_protocol.cpp
     src/zoom/signal_outbox.cpp
     src/zoom/chat_signals.cpp
+    src/zoom/duck_plan.cpp
     src/zoom/jwt.cpp
   )
   target_link_libraries(zcomms_zoom PUBLIC zcomms_audio "${ZOOM_SDK_DIR}/lib/sdk.lib")
@@ -210,10 +211,12 @@ add_executable(zcomms_audio_tests
   tests/zoom/test_reach.cpp
   tests/zoom/test_signal_protocol.cpp
   tests/zoom/test_signal_outbox.cpp
+  tests/zoom/test_duck_plan.cpp
   src/zoom/room_plan.cpp
   src/zoom/reach.cpp
   src/zoom/signal_protocol.cpp
   src/zoom/signal_outbox.cpp
+  src/zoom/duck_plan.cpp
 )
 target_link_libraries(zcomms_audio_tests PRIVATE zcomms_audio)
 # src/zoom on the include path for the SDK-FREE zoom headers only

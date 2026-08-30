@@ -66,3 +66,4 @@ void TestRoomPlan();
 void TestReach();
 void TestSignalProtocol();
 void TestSignalOutbox();
+void TestDuckPlan();

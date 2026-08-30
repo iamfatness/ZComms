@@ -45,6 +45,7 @@
 #include "generator.h"
 #include "breakout.h"
 #include "chat_signals.h"
+#include "duck_plan.h"
 #include "reach.h"
 #include "room_plan.h"
 #include "roster.h"
@@ -90,6 +91,12 @@ struct AppConfig {
   // engine -> channel -> listener with a signal a detector can find; the mic
   // capture path itself is verified separately on hardware.
   bool test_signal = false;
+  // Send each auto-assigned talent a private courtesy chat ("you are on
+  // talkback CH n"). OFF by default: in a real production (Office Hours,
+  // 2026-08-30) the bring-up messaged the whole meeting, audience included
+  // -- one line per participant, each at join/co-host grant. The panel's
+  // explicit `notify <slot>` verb is always available regardless.
+  bool announce = false;
   int run_seconds = 0;  // 0 = run until Q
   // The browser panel / control API (plan §6.4). 0 disables.
   uint16_t ui_port = 7350;
@@ -243,6 +250,9 @@ OPTIONS
   --out <s>            Sidetone output device substring.
   --no-sidetone        Do not open an output device.
   --gain <dB>          Input gain. Default 0.
+  --announce           Chat each auto-assigned talent a private "you are on
+                       talkback CH n" notice. Default: silent bring-up (the
+                       panel's NOTIFY button always works either way).
 
 KEYS (while running)
   SPACE (hold)   talk to the channel
@@ -353,6 +363,7 @@ int Run(int argc, char** argv) {
     else if (a == "--gain") cfg.gain_db = std::atof(next("--gain"));
     else if (a == "--latch") cfg.start_latched = true;
     else if (a == "--test-signal") cfg.test_signal = true;
+    else if (a == "--announce") cfg.announce = true;
     else if (a == "--seconds") cfg.run_seconds = std::atoi(next("--seconds"));
     else if (a == "--channels") cfg.channels = std::atoi(next("--channels"));
     else if (a == "--no-ui") cfg.ui_port = 0;
@@ -794,7 +805,7 @@ int Run(int argc, char** argv) {
     log_op("this meeting does not support talkback -- cues via chat");
     // Requirement: when talkback is unavailable, chat becomes the cue
     // path -- tell every desk before leaving (one paced flush).
-    chat.BroadcastFallback(true);
+    chat.SignalFallback(true);
     chat.Tick(NowNs() / 1'000'000);
     zoom.Leave();
     zoom.Cleanup();
@@ -849,13 +860,17 @@ int Run(int argc, char** argv) {
   }
   if (!created) {
     log_op("could not create talkback channels (never granted host/co-host?)");
-    chat.BroadcastFallback(true);
+    chat.SignalFallback(true);
     chat.Tick(NowNs() / 1'000'000);
     zoom.Leave();
     zoom.Cleanup();
     return -1;
   }
-  bank.SetBackgroundVolumeAll(0.2f);  // duck, don't erase, the meeting
+  // Channel volume is owned by the DuckPlanner in the main loop: unity the
+  // moment each channel is ready (Zoom ducks members by default, and talent
+  // hears the drop on mere assignment -- CoreVideo, live 2026-08-30), duck
+  // only while that channel is keyed. Late responses from a partial grant
+  // are covered because the planner heals against ready_mask every tick.
   std::printf("[zoom] %d channel(s) up\n", n_channels);
 
   // --- Audio path -----------------------------------------------------------
@@ -928,6 +943,7 @@ int Run(int argc, char** argv) {
   bool room_move_departed = false; // the move has visibly left INMEETING
   int64_t next_heal_ns = 0;
   uint32_t prev_keys = 0;      // for keyed-an-empty-channel warnings
+  DuckPlanner duck;            // unity at creation, duck only while keyed
   uint32_t prev_sent_mask = 0; // for first-audio-into-channel notices
   int64_t keyed_silent_since = 0;
   // Device lists for the settings drawer, refreshed on a lazy cadence --
@@ -1080,10 +1096,14 @@ int Run(int argc, char** argv) {
           if (pick >= 0) {
             intent.insert({pick, m.user_id});
             log_op(m.name + " -> CH " + std::to_string(pick + 1));
-            // The path that reaches talent on stock Zoom clients: a
-            // private, human-readable notice of where their ear is.
-            chat.SendAssignNotice(m.user_id, m.name,
-                                  "CH " + std::to_string(pick + 1));
+            // The courtesy chat is OPT-IN (--announce): auto-fired at
+            // bring-up it messaged an entire production's audience
+            // (Office Hours, 2026-08-30). The operator can still send it
+            // deliberately per channel via the panel's notify verb.
+            if (cfg.announce) {
+              chat.SendAssignNotice(m.user_id, m.name,
+                                    "CH " + std::to_string(pick + 1));
+            }
           }
         }
       }
@@ -1634,6 +1654,20 @@ int Run(int argc, char** argv) {
     }
     prev_keys = keys;
     talking = keys != 0;
+
+    // Meeting-audio duck under the talkback voice: unity when idle, kDuck
+    // while keyed, healed one paced SDK call at a time (the per-call rate
+    // limit applies to volume calls like everything else).
+    {
+      VolumeAction va;
+      if (duck.Next(bank.ready_mask(), keys, NowNs() / 1'000'000, &va)) {
+        if (bank.SetChannelVolume(va.slot, va.volume)) {
+          duck.Confirm(va);
+        } else {
+          duck.Fail(NowNs() / 1'000'000);
+        }
+      }
+    }
 
     // TX truth-telling, both directions: name the first moment Zoom accepts
     // audio for each channel, and call out a transmitter that is keyed but
