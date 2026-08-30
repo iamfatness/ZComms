@@ -16,6 +16,7 @@
 // clang-format on
 
 #include <functional>
+#include <set>
 #include <string>
 
 #include "meeting_service_components/meeting_chat_interface.h"
@@ -35,7 +36,11 @@ class ChatSignals : public ZOOM_SDK_NAMESPACE::IMeetingChatCtrlEvent {
   void SendSignalTo(unsigned int user_id, const SignalMsg& m);  // queued
   void SendAssignNotice(unsigned int user_id, const std::string& person,
                         const std::string& channel_name);  // human text
-  void BroadcastFallback(bool active);                     // to-all
+  // Fallback goes ONLY to known peer desks (senders of decoded signals):
+  // a To_All protocol line rendered in every attendee's chat (stock clients
+  // show inbound ~ZC1~ lines), and an audience that cannot decode it gains
+  // nothing from seeing it. No peers known = nothing sent.
+  void SignalFallback(bool active);
 
   // Pump thread: drains the outbox through the builder, paced.
   void Tick(int64_t now_ms);
@@ -63,6 +68,10 @@ class ChatSignals : public ZOOM_SDK_NAMESPACE::IMeetingChatCtrlEvent {
   OnSignalFn on_signal_;
   SignalOutbox outbox_;
   bool can_chat_ = true;  // optimistic until a status event says otherwise
+  // Peer desks: anyone whose chat decoded as ours. User ids are
+  // meeting-scoped, so this set dies with the session (it lives in a
+  // session-scoped ChatSignals) -- never persist it.
+  std::set<unsigned int> peers_;
 };
 
 }  // namespace zc

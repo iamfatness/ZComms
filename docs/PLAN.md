@@ -72,7 +72,7 @@ marked — **live-verified by Spike A** rather than read off a header:
 
 | Path | API | Status |
 | --- | --- | --- |
-| **TX per-channel** | `IMeetingTalkbackController::SendAudioDataToChannel(channelID, pcm, len, rate, ch)` | **Live-verified.** 16-bit PCM, 48 kHz mono, paced at 20 ms. The product's core TX path. |
+| **TX per-channel** | `IMeetingTalkbackController::SendAudioDataToChannel(channelID, pcm, len, rate, ch)` | **Live-verified.** 16-bit PCM, 48 kHz mono, paced at 20 ms. The product's core TX path. **MONO ONLY: `ZoomSDKAudioChannel_Stereo` returns `SDKERR_SUCCESS` and delivers nothing audible** (CoreVideo, live). The header's "mono or stereo" claim lies; a stereo source must be downmixed before the SDK boundary. |
 | Channel lifecycle | `CreateChannel(count)` / batch invite / batch remove / `SetChannelBackgroundVolume` | Live-verified. Max **16 channels**, max **10 listeners per channel**, all mutations asynchronous with per-item response callbacks. |
 | Gates | `IsMeetingSupportTalkBack()`, co-host role | Live-verified: supported on an ordinary account; a guest gets `SDKERR_NO_PERMISSION` (12) and creation works seconds after co-host promotion. No entitlement beyond role was needed. |
 | TX to everyone | `IZoomSDKAudioRawDataHelper::setExternalAudioSource(...)` | Header-verified only. **Its send window never opened under public-app-key auth** (`HasRawdataLicense()` false); expect it to require JWT auth. The party-line case, when it matters. |
@@ -85,7 +85,12 @@ Talkback delivery facts that shape the product, all observed live:
   product premise. The listener is invited by user id; their join is confirmed
   by callback; no acceptance step was observed on the receiving client.
 - **`SetChannelBackgroundVolume` is real ducking**, delivered by Zoom: the
-  main meeting lowers under the channel voice for channel members only.
+  main meeting lowers under the channel voice for channel members only. And
+  **Zoom ducks channel members BY DEFAULT** — merely being placed in a channel
+  reduces their meeting volume; talent notices on assignment (CoreVideo, live,
+  same production). It is a channel-scoped 0.0–2.0 gain (1.0 = unity), so one
+  call covers late joiners. Product policy (`DuckPlanner`): unity the moment a
+  channel is ready, duck only while that channel is actually keyed.
 - **The receiving client renders talkback to the default-communications
   endpoint**, not necessarily its configured speaker device. Harmless on
   ordinary machines (they are the same device); on multi-bus interfaces it

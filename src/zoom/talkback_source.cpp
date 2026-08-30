@@ -119,6 +119,8 @@ bool ZoomTalkbackSource::Send(const int16_t* pcm, int samples) {
   const std::string id = channel_id();
   if (id.empty() || controller_ == nullptr) return false;
   const std::wstring id_w = Widen(id);
+  // Mono only: ZoomSDKAudioChannel_Stereo is accepted (SDKERR_SUCCESS) and
+  // delivers silence (CoreVideo, live). Downmix upstream if ever stereo.
   const SDKError err = controller_->SendAudioDataToChannel(
       id_w.c_str(), reinterpret_cast<const char*>(pcm),
       static_cast<unsigned int>(samples * static_cast<int>(sizeof(int16_t))),

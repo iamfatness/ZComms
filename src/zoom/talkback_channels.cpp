@@ -194,18 +194,19 @@ void TalkbackChannels::SetKey(int slot, bool down) {
   }
 }
 
-void TalkbackChannels::SetBackgroundVolumeAll(float volume) {
-  std::vector<std::string> ids;
+bool TalkbackChannels::SetChannelVolume(int slot, float volume) {
+  std::string id;
   {
     std::lock_guard<std::mutex> lock(m_);
-    for (const ChannelState& c : channels_) {
-      if (c.ready) ids.push_back(c.id);
+    if (slot < 0 || slot >= static_cast<int>(channels_.size()) ||
+        !channels_[static_cast<size_t>(slot)].ready) {
+      return false;
     }
+    id = channels_[static_cast<size_t>(slot)].id;
   }
-  for (const std::string& id : ids) {
-    const std::wstring idw = Widen(id);
-    controller_->SetChannelBackgroundVolume(idw.c_str(), volume);
-  }
+  const std::wstring idw = Widen(id);
+  return controller_->SetChannelBackgroundVolume(idw.c_str(), volume) ==
+         ZOOM_SDK_NAMESPACE::SDKERR_SUCCESS;
 }
 
 int TalkbackChannels::SendToKeyed(const int16_t* pcm, int samples) {
@@ -215,6 +216,10 @@ int TalkbackChannels::SendToKeyed(const int16_t* pcm, int samples) {
   std::lock_guard<std::mutex> lock(send_m_);
   for (int i = 0; i < kMaxChannels; ++i) {
     if (((live >> i) & 1u) == 0) continue;
+    // Mono is a LAW, not a preference: ZoomSDKAudioChannel_Stereo returns
+    // SDKERR_SUCCESS and delivers NOTHING audible (CoreVideo, live). The
+    // header's "mono or stereo" claim lies. A stereo source must be
+    // downmixed before this boundary, never declared stereo here.
     const SDKError err = controller_->SendAudioDataToChannel(
         send_ids_[static_cast<size_t>(i)].c_str(),
         reinterpret_cast<const char*>(pcm),

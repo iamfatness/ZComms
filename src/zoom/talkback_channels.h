@@ -69,8 +69,14 @@ class TalkbackChannels : public ZOOM_SDK_NAMESPACE::IMeetingTalkbackCtrlEvent {
   bool key(int slot) const { return (key_mask_.load() >> slot) & 1u; }
   uint32_t key_mask() const { return key_mask_.load(); }
 
-  // Ducks the meeting under the channel voice for every channel's members.
-  void SetBackgroundVolumeAll(float volume);
+  // One channel's meeting-audio gain under the talkback voice (0.0-2.0,
+  // 1.0 = unity). Zoom ducks channel members BY DEFAULT, so unity must be
+  // applied at creation and ducking reserved for while the channel is keyed
+  // -- the DuckPlanner in the main loop owns that policy; this is only the
+  // SDK call. Returns false on refusal (e.g. code 18) so the planner can
+  // back off.
+  bool SetChannelVolume(int slot, float volume);
+  uint32_t ready_mask() const { return ready_mask_.load(); }
 
   // From the TX pacer: one frame, fanned out to every keyed, ready channel.
   // Returns the number of channels it was sent to.

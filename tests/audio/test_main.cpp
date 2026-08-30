@@ -14,6 +14,7 @@ int main() {
   TestReach();
   TestSignalProtocol();
   TestSignalOutbox();
+  TestDuckPlan();
 
   const auto& failures = zctest::Failures();
   std::printf("\n");

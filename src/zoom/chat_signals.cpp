@@ -45,11 +45,15 @@ void ChatSignals::SendAssignNotice(unsigned int user_id,
   outbox_.Push({user_id, AssignNoticeText(person, channel_name)});
 }
 
-void ChatSignals::BroadcastFallback(bool active) {
+void ChatSignals::SignalFallback(bool active) {
   SignalMsg m;
   m.kind = SignalKind::kFallback;
   m.on = active;
-  outbox_.Push({0, EncodeSignal(m)});
+  const std::string wire = EncodeSignal(m);
+  // Targeted, never To_All: a broadcast protocol line lands in every
+  // attendee's chat (Office Hours, 2026-08-30 -- the bring-up messaged an
+  // audience). Only desks that have signaled us can decode a fallback.
+  for (const unsigned int uid : peers_) outbox_.Push({uid, wire});
 }
 
 void ChatSignals::Tick(int64_t now_ms) {
@@ -82,6 +86,7 @@ void ChatSignals::onChatMsgNotification(IChatMsgInfo* chatMsg,
   const std::string content = Narrow(chatMsg->GetContent());
   SignalMsg m;
   if (!DecodeSignal(content, &m)) return;  // human chat: not ours, not touched
+  peers_.insert(chatMsg->GetSenderUserId());  // a desk: fallback-reachable
   if (on_signal_) on_signal_(m, chatMsg->GetSenderUserId());
   // Best-effort hiding of our own echoed signaling traffic. The SDK offers
   // no way to suppress rendering on a receiver's stock client; a private
