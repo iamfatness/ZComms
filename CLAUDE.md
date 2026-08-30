@@ -187,7 +187,13 @@ found live and each now enforced or surfaced:
    operator's client must NOT be in the PMI (either order collides).
 
 Two more laws adopted 2026-08-30 from CoreVideo's live measurements (same
-production; both cost real debugging there):
+production; both cost real debugging there). **Live-verified same day**
+(external meeting 96553474365, ~10 participants, operator listening on a
+second device auto-assigned to CH 7): silent bring-up -- 7 auto-assigns,
+zero chat traffic; keyed CH 7 -> chirps + meeting duck heard, released ->
+restored; `notify 6` landed on the target client only; 10k+ sends 0
+failures; clean quit. No talent reported a volume drop on assignment
+(unity-at-create doing its job).
 
 4. **Zoom DUCKS a channel member's meeting audio BY DEFAULT** -- merely
    being placed in a talkback channel reduces their meeting volume, and
