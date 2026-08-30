@@ -924,6 +924,8 @@ int Run(int argc, char** argv) {
   std::map<std::pair<int, unsigned int>, std::pair<int, int64_t>>
       invite_backoff;
   int heal_rr = 0;  // round-robin start slot for the one-call-per-pass healer
+  int64_t room_move_grace_ns = 0;  // ride out a deliberate BO move
+  bool room_move_departed = false; // the move has visibly left INMEETING
   int64_t next_heal_ns = 0;
   uint32_t prev_keys = 0;      // for keyed-an-empty-channel warnings
   uint32_t prev_sent_mask = 0; // for first-audio-into-channel notices
@@ -967,7 +969,23 @@ int Run(int argc, char** argv) {
     }
   });
 
-  while (!quit && zoom.session_alive()) {
+  while (!quit &&
+         (zoom.session_alive() || NowNs() < room_move_grace_ns)) {
+    // The grace window clears only after the move has VISIBLY departed
+    // INMEETING and come back -- clearing on the first still-INMEETING tick
+    // re-armed the meeting-over exit before the transition even began
+    // (live 2026-08-30, hop attempt #3: "room move complete" logged
+    // instantly, then JOIN_BREAKOUT_ROOM/RECONNECTING/CONNECTING killed
+    // the loop).
+    if (room_move_grace_ns != 0) {
+      if (!zoom.in_meeting()) {
+        room_move_departed = true;
+      } else if (room_move_departed) {
+        room_move_grace_ns = 0;
+        room_move_departed = false;
+        log_op("room move complete");
+      }
+    }
     if (end_ns != 0 && NowNs() >= end_ns) break;
     heartbeat_ns.store(NowNs());
     zoom.Pump(30);
@@ -1010,7 +1028,12 @@ int Run(int argc, char** argv) {
       // Prune intent for people no longer here: user ids are meeting-scoped
       // and recycled (plan §5) -- a stale id must not keep a channel
       // "occupied" or the direct-key pool drains on churn.
-      {
+      // NEVER while breakouts run: the roster only shows this room's
+      // occupants, so cross-room people "vanish" and pruning them turned
+      // the healer DESTRUCTIVE (live 2026-08-30: one station hop and it
+      // began removing every main-floor member from their channels --
+      // only Zoom's cross-room refusal stopped it).
+      if (!bo_state.started) {
         std::set<unsigned int> present;
         for (const RosterMember& m : roster.others()) present.insert(m.user_id);
         for (auto it = intent.begin(); it != intent.end();) {
@@ -1036,6 +1059,10 @@ int Run(int argc, char** argv) {
         return static_cast<int>(ids.size());
       };
       for (const RosterMember& m : roster.others()) {
+        // Inside a breakout the SDK can list this station itself under a
+        // fresh id -- auto-assigning it drew a self-invite (code 3, live
+        // 2026-08-30). Our own name is never talent.
+        if (m.name == cfg.display_name) continue;
         if (!m.supports_talkback) {
           if (warned_no_talkback.insert(m.user_id).second) {
             log_op(m.name + " cannot receive talkback (web client) -- skipped");
@@ -1099,9 +1126,15 @@ int Run(int argc, char** argv) {
               if (!missing_names.empty()) missing_names += ", ";
               missing_names += m.name;
             }
-          } else if (!want && have && !have_remove) {
-            to_remove = m.user_id;
-            have_remove = true;
+          } else if (!want && have && same_room && !have_remove) {
+            // Removals are room-scoped like invites (cross-room fails code
+            // 3) and get the same backoff -- a repeatedly-refused remove
+            // must not churn every pass (live 2026-08-30).
+            const auto rb = invite_backoff.find({s, m.user_id});
+            if (rb == invite_backoff.end() || NowNs() >= rb->second.second) {
+              to_remove = m.user_id;
+              have_remove = true;
+            }
           }
         }
         if (!missing.empty()) {
@@ -1126,6 +1159,9 @@ int Run(int argc, char** argv) {
         } else if (have_remove) {
           if (!bank.Remove(s, to_remove, &err)) {
             log_op("CH " + std::to_string(s + 1) + " remove failed: " + err);
+            auto& b = invite_backoff[{s, to_remove}];
+            b.first += 1;
+            b.second = NowNs() + 30'000'000'000LL;
           }
           acted = true;
           heal_rr = s + 1;
@@ -1511,8 +1547,18 @@ int Run(int argc, char** argv) {
         std::string berr;
         const bool ok = (want_room == "main") ? bo.ReturnToMain(&berr)
                                               : bo.SwitchToRoom(want_room, &berr);
-        if (!ok) log_op("room move failed: " + berr);
-        // Success reports itself via the next snapshot's room-change log.
+        if (!ok) {
+          log_op("room move failed: " + berr);
+        } else {
+          // A breakout move is a full disconnect/reconnect under the hood
+          // (live 2026-08-30: the status ran through DISCONNECTING/ENDED,
+          // twice killing the session -- a status whitelist cannot tell a
+          // deliberate move from a real meeting end). WE ordered this
+          // transition, so ride out ANY status for a bounded window until
+          // the meeting comes back.
+          room_move_grace_ns = NowNs() + 20'000'000'000LL;
+          log_op("moving rooms...");
+        }
       }
       if ((!want_mic.empty() || !want_out.empty()) && engine) {
         if (!want_mic.empty()) cfg.mic_device = want_mic;

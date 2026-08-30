@@ -138,6 +138,11 @@ class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
       case ZOOM_SDK_NAMESPACE::MEETING_STATUS_JOIN_BREAKOUT_ROOM:
       case ZOOM_SDK_NAMESPACE::MEETING_STATUS_LEAVE_BREAKOUT_ROOM:
       case ZOOM_SDK_NAMESPACE::MEETING_STATUS_RECONNECTING:
+      // CONNECTING appears mid-session during a breakout move's rejoin leg
+      // (JOIN_BREAKOUT_ROOM -> RECONNECTING -> CONNECTING -> INMEETING,
+      // captured live 2026-08-30); by construction the session loop only
+      // runs after the first join, so it never means "still joining" here.
+      case ZOOM_SDK_NAMESPACE::MEETING_STATUS_CONNECTING:
         return true;
       default:
         return false;
