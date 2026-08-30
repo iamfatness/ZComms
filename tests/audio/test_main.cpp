@@ -12,6 +12,7 @@ int main() {
   TestAec();
   TestRoomPlan();
   TestReach();
+  TestSignalProtocol();
 
   const auto& failures = zctest::Failures();
   std::printf("\n");

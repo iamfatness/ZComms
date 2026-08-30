@@ -205,8 +205,10 @@ add_executable(zcomms_audio_tests
   tests/audio/test_aec.cpp
   tests/zoom/test_room_plan.cpp
   tests/zoom/test_reach.cpp
+  tests/zoom/test_signal_protocol.cpp
   src/zoom/room_plan.cpp
   src/zoom/reach.cpp
+  src/zoom/signal_protocol.cpp
 )
 target_link_libraries(zcomms_audio_tests PRIVATE zcomms_audio)
 # src/zoom on the include path for the SDK-FREE zoom headers only
