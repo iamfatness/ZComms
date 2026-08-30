@@ -1419,6 +1419,13 @@ int Run(int argc, char** argv) {
 }  // namespace zc
 
 int main(int argc, char** argv) {
+  // Per-monitor-v2 DPI awareness, set before ANY window exists (it cannot
+  // be changed after) and in code because there is no manifest: without it
+  // Windows bitmap-stretches the shell window at any scale above 100% --
+  // the blurry-on-high-DPI report (owner, 2026-08-30). WebView2 under
+  // per-monitor-v2 rasterizes at native DPI and keeps the panel at its
+  // designed logical size via devicePixelRatio.
+  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   timeBeginPeriod(1);
   const int rc = zc::Run(argc, argv);

@@ -42,12 +42,23 @@ LRESULT CALLBACK ShellProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       return 0;
     case WM_GETMINMAXINFO: {
-      // The panel degrades below its designed size; don't let it.
-      RECT frame{0, 0, g_client_w, g_client_h};
-      AdjustWindowRect(&frame, WS_OVERLAPPEDWINDOW, FALSE);
+      // The panel degrades below its designed size; don't let it. Sizes are
+      // DIPs; scale by the window's current DPI.
+      const UINT dpi = GetDpiForWindow(hwnd);
+      RECT frame{0, 0, MulDiv(g_client_w, (int)dpi, 96),
+                 MulDiv(g_client_h, (int)dpi, 96)};
+      AdjustWindowRectExForDpi(&frame, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
       auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
       mmi->ptMinTrackSize.x = (frame.right - frame.left) * 3 / 4;
       mmi->ptMinTrackSize.y = (frame.bottom - frame.top) * 3 / 4;
+      return 0;
+    }
+    case WM_DPICHANGED: {
+      // Dragged to a monitor with a different scale: take the suggested
+      // rect; WM_SIZE re-bounds the WebView, which re-rasterizes crisply.
+      const RECT* r = reinterpret_cast<const RECT*>(lp);
+      SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left,
+                   r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
       return 0;
     }
     case WM_SETFOCUS:
@@ -79,6 +90,9 @@ std::wstring UserDataDir() {
 }
 
 void ShellThread(std::wstring url, std::function<void()> on_closed) {
+  // DPI awareness is declared at process start (main.cpp) -- it cannot be
+  // changed once any window exists. Everything here computes in DIPs and
+  // scales by the live DPI.
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
   WNDCLASSW wc{};
@@ -89,8 +103,12 @@ void ShellThread(std::wstring url, std::function<void()> on_closed) {
   wc.hbrBackground = CreateSolidBrush(RGB(0x1b, 0x1d, 0x21));  // panel iron
   RegisterClassW(&wc);
 
-  RECT frame{0, 0, g_client_w, g_client_h};
-  AdjustWindowRect(&frame, WS_OVERLAPPEDWINDOW, FALSE);
+  // The designed 1000x640 is logical (DIP); the window is created in
+  // physical pixels for wherever it lands.
+  const UINT dpi = GetDpiForSystem();
+  RECT frame{0, 0, MulDiv(g_client_w, (int)dpi, 96),
+             MulDiv(g_client_h, (int)dpi, 96)};
+  AdjustWindowRectExForDpi(&frame, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
   const int w = frame.right - frame.left;
   const int h = frame.bottom - frame.top;
   const int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
