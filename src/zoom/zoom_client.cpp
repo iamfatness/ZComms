@@ -580,6 +580,10 @@ IMeetingBOController* ZoomClient::GetBOController() {
   return meeting_ != nullptr ? meeting_->GetMeetingBOController() : nullptr;
 }
 
+IMeetingChatController* ZoomClient::GetChatController() {
+  return meeting_ != nullptr ? meeting_->GetMeetingChatController() : nullptr;
+}
+
 std::vector<unsigned int> ZoomClient::GetOtherParticipants() {
   std::vector<unsigned int> out;
   if (meeting_ == nullptr) return out;

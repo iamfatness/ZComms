@@ -215,6 +215,29 @@ spillover past 16 goes to the least-loaded channel; a partial grant proceeds
 after three rounds. Panel: ALL CALL + LATCH ALL (verbs `talkall`/`latchall`),
 empty spares hidden, chips = in-use channels + one spare.
 
+### Chat signaling (2026-08-30, plan docs/plans/2026-08-29-chat-signaling-channel.md)
+
+Zoom chat is the data side-channel. Wire format (`src/zoom/signal_protocol`,
+pure): literal prefix `~ZC1~` + one flat JSON line; kinds cue/assign/
+fallback/hello; unknown prefix versions and kinds are IGNORED, never errors.
+Sends queue through `SignalOutbox` (pure): one send per 300ms, FIFO capped
+64 drop-oldest with a counted stat -- the per-call rate limiter (code 18)
+applies to chat like everything else. SDK glue `ChatSignals`
+(IMeetingChatCtrlEvent; builder chain SetContent/SetReceiver/SetMessageType/
+Build -> SendChatMsgTo) decodes inbound, tracks `can_chat` from chat-status
+events (host restricting chat = fallback path down, one ops line per
+transition), and best-effort deletes its OWN echoed signaling messages --
+**the SDK has no invisible/data-only chat; a receiver's stock client may
+render inbound protocol lines** (private messages are at least invisible to
+third parties). App: verbs `cue <slot> on|off` and `notify <slot>`;
+auto-assignment sends a private human notice to each talent ("you are on
+talkback CH n"); talkback-unsupported / channel-creation-failure broadcasts
+a `fallback` signal before leaving. onChatMsgNotification's `content`
+param is documented "currently invalid" -- use IChatMsgInfo::GetContent().
+Live checklist NOT yet run (needs a meeting + a second desk for the
+cue leg): notify renders only in the target client; desk-to-desk cue logs
++ self-deletes; host-only chat draws the ops warning.
+
 ### Sub-production rooms (2026-08-30, plan docs/plans/2026-08-29-breakout-subproduction-comms.md)
 
 Programmatic breakout staffing for sub-productions (green room, per-segment

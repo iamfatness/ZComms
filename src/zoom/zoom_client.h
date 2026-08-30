@@ -104,6 +104,8 @@ class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
 
   ZOOM_SDK_NAMESPACE::IMeetingBOController* GetBOController();
 
+  ZOOM_SDK_NAMESPACE::IMeetingChatController* GetChatController();
+
   // Admits everyone currently in the waiting room. Host/co-host only; a
   // no-permission failure is expected when not host and is not an error worth
   // surfacing every tick.

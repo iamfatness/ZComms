@@ -64,3 +64,5 @@ void TestFrameRing();
 void TestAec();
 void TestRoomPlan();
 void TestReach();
+void TestSignalProtocol();
+void TestSignalOutbox();
