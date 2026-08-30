@@ -68,6 +68,55 @@ namespace {
   for (;;) {}
 }
 
+// True when an interactive console exists for hotkeys (_kbhit/_getch).
+bool g_console_keys = false;
+
+// The exe is a Windows-subsystem app -- a real windowed app that never
+// creates a console of its own (owner, 2026-08-30: the console window
+// alongside the panel read as not-a-real-app). The printf diagnostic
+// stream is still load-bearing, so it lands somewhere useful, decided once
+// at startup in priority order: an already-redirected stdout is honored
+// (scripted runs and pipes), a parent terminal is attached (dev runs print
+// where they were typed), and an Explorer launch writes a dated log file
+// under %APPDATA%\ZComms\logs so the instruments survive with no console
+// anywhere. The panel's ops ticker remains the operator surface.
+void BindStdio() {
+  const HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (out != nullptr && out != INVALID_HANDLE_VALUE) {
+    // Inherited or redirected by the launcher: leave it alone.
+    g_console_keys = GetConsoleWindow() != nullptr;
+    return;
+  }
+  if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+    FILE* f = nullptr;
+    freopen_s(&f, "CONOUT$", "w", stdout);
+    freopen_s(&f, "CONOUT$", "w", stderr);
+    freopen_s(&f, "CONIN$", "r", stdin);
+    // The parent shell's prompt has already returned (it does not wait for
+    // a GUI-subsystem exe); start our output on a fresh line.
+    std::printf("\n");
+    g_console_keys = true;
+    return;
+  }
+  char appdata[MAX_PATH] = {};
+  if (GetEnvironmentVariableA("APPDATA", appdata, sizeof(appdata)) == 0) {
+    return;  // no console, no %APPDATA%: output goes nowhere, app still runs
+  }
+  std::string dir = std::string(appdata) + "\\ZComms";
+  CreateDirectoryA(dir.c_str(), nullptr);
+  dir += "\\logs";
+  CreateDirectoryA(dir.c_str(), nullptr);
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  char name[64];
+  std::snprintf(name, sizeof(name), "\\zcomms-%04u%02u%02u-%02u%02u%02u.log",
+                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+  const std::string path = dir + name;
+  FILE* f = nullptr;
+  freopen_s(&f, path.c_str(), "w", stdout);
+  freopen_s(&f, path.c_str(), "a", stderr);
+}
+
 struct AppConfig {
   std::string public_app_key;
   // Anonymous guest join under the bare public app key. OFF by default:
@@ -526,13 +575,11 @@ int Run(int argc, char** argv) {
 #endif
         if (!shown) {
           OpenAppWindow(url);
-        } else {
-          // The panel is the app; the console is a diagnostic stream, not
-          // a second face. Live 2026-08-29 ("logs are going crazy"): the
-          // SDK's per-event chatter scrolling next to the panel read as a
-          // malfunction. Headless runs keep the console.
-          ShowWindow(GetConsoleWindow(), SW_HIDE);
         }
+        // No console to hide: the exe is Windows-subsystem now, and any
+        // console window that DOES exist belongs to the terminal the
+        // operator launched from -- hiding their terminal is not ours to
+        // do. Diagnostics routing is BindStdio()'s job.
       }
     } else {
       std::printf("WARNING: %s -- running without the panel\n", ui_err.c_str());
@@ -1706,7 +1753,7 @@ int Run(int argc, char** argv) {
     // level, which is how hardware panels behave.
     if (engine) engine->SetTalk(talking);
 
-    while (_kbhit()) {
+    while (g_console_keys && _kbhit()) {
       const int c = _getch();
       switch (c) {
         case 'q': case 'Q': quit = true; break;
@@ -1787,6 +1834,7 @@ int main(int argc, char** argv) {
   // per-monitor-v2 rasterizes at native DPI and keeps the panel at its
   // designed logical size via devicePixelRatio.
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  zc::BindStdio();
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   timeBeginPeriod(1);
   const int rc = zc::Run(argc, argv);

@@ -150,6 +150,13 @@ endif()
 if(ZCOMMS_HAVE_SDK)
   add_executable(zcomms src/app/main.cpp src/app/control_server.cpp
                         src/app/zoom_oauth.cpp src/app/version.rc)
+  # A real windowed app: no console of its own, ever. main() stays the entry
+  # point; BindStdio() in main.cpp decides where diagnostics land (pipe,
+  # parent terminal, or a log file).
+  set_target_properties(zcomms PROPERTIES WIN32_EXECUTABLE TRUE)
+  if(MSVC)
+    target_link_options(zcomms PRIVATE "/ENTRY:mainCRTStartup")
+  endif()
   target_link_libraries(zcomms PRIVATE zcomms_zoom winmm ws2_32 shell32
                         winhttp crypt32 bcrypt)
   if(ZCOMMS_HAVE_WEBVIEW2)

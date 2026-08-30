@@ -138,6 +138,20 @@ Verified before the live run:
 Run `--self-test` before believing any live figure; the live run has no ground
 truth by construction, so that is the only place the instrument gets checked.
 
+### A real windowed app (2026-08-30)
+
+`zcomms.exe` is a **Windows-subsystem** exe (`WIN32_EXECUTABLE`, entry still
+`main()` via `/ENTRY:mainCRTStartup`): double-clicking never creates a
+console -- the console window alongside the panel read as not-a-real-app
+(owner). The printf diagnostic stream is still load-bearing; `BindStdio()`
+in main.cpp routes it once at startup, in priority order: an
+already-redirected stdout is honored (pipes/scripted runs), a parent
+terminal is attached (dev runs -- note the shell prompt returns immediately;
+GUI exes are not waited on), else a dated log file under
+`%APPDATA%\ZComms\logs\`. Console hotkeys run only when a console exists
+(`g_console_keys`); the old hide-the-console hack is gone -- any console
+present now belongs to the operator's own terminal.
+
 ### The panel is a native window (2026-08-29)
 
 `src/app/shell_window.cpp` hosts the panel in **WebView2** on a dedicated STA
