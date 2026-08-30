@@ -303,6 +303,12 @@ loudly -- sign-in needs the panel's callback server).
 
 ### The app identity's join boundary (2026-08-29, live-diagnosed)
 
+**SCOPE (owner correction 2026-08-30): this boundary applies ONLY to the
+`--anon` public-app-key guest path.** Signed-in ZAK joins have no such
+restriction -- cross-account meetings join and operate fine (live-proven
+extensively in 96553474365). Do not describe this as a product limitation
+anywhere operator-facing.
+
 **Under the PKCE public-app-key identity, ZComms can only guest-join meetings
 hosted by the Zoom account that authorized the app.** A cross-account meeting
 fails with `MEETING_FAIL_APP_CAN_NOT_ANONYMOUS_JOIN_MEETING` (504) -- decoded
