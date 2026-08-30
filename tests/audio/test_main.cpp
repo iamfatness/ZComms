@@ -11,6 +11,7 @@ int main() {
   TestFrameRing();
   TestAec();
   TestRoomPlan();
+  TestReach();
 
   const auto& failures = zctest::Failures();
   std::printf("\n");

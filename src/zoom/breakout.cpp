@@ -2,6 +2,8 @@
 
 #include <cstdio>
 
+#include "reach.h"
+
 using namespace ZOOM_SDK_NAMESPACE;
 
 namespace zc {
@@ -71,12 +73,8 @@ BreakoutState BreakoutRooms::Snapshot() {
 
 std::string BreakoutRooms::RoomOf(const BreakoutState& s,
                                   const std::string& name) {
-  for (const BreakoutRoomInfo& r : s.rooms) {
-    for (const std::string& u : r.user_names) {
-      if (u == name) return r.name;
-    }
-  }
-  return "";  // main floor (or not visible to us)
+  // One room-resolution rule for the whole product; reach.cpp owns it.
+  return RoomOfName(s, name);
 }
 
 bool BreakoutRooms::SwitchToRoom(const std::string& bo_id, std::string* error) {
