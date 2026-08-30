@@ -42,17 +42,6 @@ A native Zoom client (desktop or mobile). The Zoom **web** client cannot
 receive talkback; the panel marks such people `NO TALKBACK`. Nothing to
 install on their side — a plain Zoom client hears channel audio natively.
 
-## Platform truths (the SDK's rules, surfaced honestly)
-
-- Channel creation needs ZComms promoted to **host or co-host**; as host it
-  also admits your panelists from the waiting room.
-- Talkback **does not cross breakout rooms** — the panel says so per person
-  instead of pretending.
-- Meetings hosted by Zoom accounts that never authorized the app are refused
-  by Zoom at join; the panel names it.
-- Your account can't be hosting a meeting on another device while ZComms
-  joins as you — ZComms declines to end it and says why.
-
 ## Building from source
 
 Windows x64, Visual Studio 2022, CMake ≥3.20.

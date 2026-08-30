@@ -54,12 +54,13 @@ class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
                            std::string* error);
 
   // on_tick (optional) runs every pump iteration of the join wait, so the
-  // caller can surface progress -- and, when the meeting demands a passcode
-  // the operator didn't provide, collect one -- without owning the loop.
+  // caller can surface progress, collect a passcode -- and CANCEL: a false
+  // return aborts the join (the operator's only exit from a stuck waiting
+  // room / never-admitted join used to be killing the app, 2026-08-30).
   // zak, when non-empty, joins as the signed-in user (JoinParam userZAK).
   bool Join(uint64_t meeting_number, const std::string& password,
             const std::string& display_name, int timeout_ms, std::string* error,
-            const std::function<void()>& on_tick = nullptr,
+            const std::function<bool()>& on_tick = nullptr,
             const std::string& zak = std::string());
 
   // Passcode conversation, driven by onInputMeetingPasswordAndScreenName-
@@ -125,6 +126,27 @@ class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
   ZOOM_SDK_NAMESPACE::MeetingStatus status() const { return status_.load(); }
   bool in_meeting() const {
     return status_.load() == ZOOM_SDK_NAMESPACE::MEETING_STATUS_INMEETING;
+  }
+  // The session-loop liveness test. Distinct from in_meeting(): moving
+  // between breakout rooms transitions through JOIN/LEAVE_BREAKOUT_ROOM
+  // (and network blips through RECONNECTING) -- treating those as "meeting
+  // over" tore the whole session down on the FIRST live room hop
+  // (2026-08-30: station entered a breakout, app declared meeting ended).
+  bool session_alive() const {
+    switch (status_.load()) {
+      case ZOOM_SDK_NAMESPACE::MEETING_STATUS_INMEETING:
+      case ZOOM_SDK_NAMESPACE::MEETING_STATUS_JOIN_BREAKOUT_ROOM:
+      case ZOOM_SDK_NAMESPACE::MEETING_STATUS_LEAVE_BREAKOUT_ROOM:
+      case ZOOM_SDK_NAMESPACE::MEETING_STATUS_RECONNECTING:
+      // CONNECTING appears mid-session during a breakout move's rejoin leg
+      // (JOIN_BREAKOUT_ROOM -> RECONNECTING -> CONNECTING -> INMEETING,
+      // captured live 2026-08-30); by construction the session loop only
+      // runs after the first join, so it never means "still joining" here.
+      case ZOOM_SDK_NAMESPACE::MEETING_STATUS_CONNECTING:
+        return true;
+      default:
+        return false;
+    }
   }
 
   // IAuthServiceEvent

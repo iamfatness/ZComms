@@ -261,10 +261,26 @@ engine. Channels publish `reach {ok[],dark[[name,room]]}`; a cell whose
 whole population is elsewhere goes dark and refuses the press; a partial
 group stays keyable with "N elsewhere"; keyed-unreachable logs an ops line.
 Rights honesty: creator/admin only via rights callbacks; every verb names
-the missing right. **Live checklist NOT yet run** (needs a breakout
-production): create+staff two rooms from the panel; member moves -> dark
-cell within one pass, no WRONG_USAGE; return -> re-invite + audible
-delivery; `bo stop` -> all-reachable.
+the missing right.
+
+**LIVE-VERIFIED 2026-08-30** (external meeting 96553474365 with 4 running
+breakouts, station hopped main <-> Video Test Room): room enumeration,
+station-room truth, dark cells + key refusal for cross-room people, reach
+restoring on return, session surviving both hops. Four live defects found
+and fixed in the process: (1) a breakout move is a full
+JOIN_BREAKOUT_ROOM -> RECONNECTING -> CONNECTING rejoin -- session_alive()
+tolerates those, and a deliberate move arms a 20s grace window that clears
+only after the status has visibly LEFT and RETURNED to INMEETING (clearing
+on the first still-INMEETING tick re-armed the meeting-over exit); (2)
+GetCurrentBoName() goes STALE after returning to main -- IsInBOMeeting()
+is the authority, my_room is forced empty when it is false; (3) the roster
+only shows the current room's occupants while breakouts run, so the
+uid-prune is DISABLED while started (it turned the healer destructive:
+one hop and it began removing every main-floor member); (4) removals are
+room-scoped and backoff like invites; the station's own BO-instance ghost
+(same display name, fresh id) is never auto-assigned. NOT yet verified:
+bo layout/apply/start against our own rooms, cross-room audio realign
+delivery, the chat-notify visual on a stock client.
 
 ### Signed-in joins: the CoreVideo auth pattern (2026-08-29)
 
@@ -286,6 +302,12 @@ guest join for scripted same-account runs (headless without a session errors
 loudly -- sign-in needs the panel's callback server).
 
 ### The app identity's join boundary (2026-08-29, live-diagnosed)
+
+**SCOPE (owner correction 2026-08-30): this boundary applies ONLY to the
+`--anon` public-app-key guest path.** Signed-in ZAK joins have no such
+restriction -- cross-account meetings join and operate fine (live-proven
+extensively in 96553474365). Do not describe this as a product limitation
+anywhere operator-facing.
 
 **Under the PKCE public-app-key identity, ZComms can only guest-join meetings
 hosted by the Zoom account that authorized the app.** A cross-account meeting

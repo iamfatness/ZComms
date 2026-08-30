@@ -89,7 +89,11 @@ BreakoutState BreakoutRooms::Snapshot() {
   if (data_ == nullptr) data_ = controller_->GetBODataHelper();
   if (data_ == nullptr) return s;
 
-  s.my_room = Narrow(data_->GetCurrentBoName());
+  // IsInBOMeeting() is the authority on WHERE WE ARE; GetCurrentBoName()
+  // goes stale after returning to the main session (live 2026-08-30: it
+  // kept reporting the room after a completed LeaveBO round trip, which
+  // poisoned my_room and computed every channel as unreachable).
+  s.my_room = s.in_bo ? Narrow(data_->GetCurrentBoName()) : "";
   IList<const zchar_t*>* ids = data_->GetBOMeetingIDList();
   if (ids == nullptr) return s;
   for (int i = 0; i < ids->GetCount(); ++i) {

@@ -44,8 +44,6 @@ so the room hears silence), **CHANNEL** (channels up), **TX** (on air).
 - Your Zoom account cannot be hosting a meeting on another device while
   ZComms joins as you — leave it there first, or join a meeting you are
   not hosting.
-- Meetings hosted by accounts that have not authorized this app are
-  refused by Zoom; the panel says so.
 - Headsets are still the professional choice.
 
 ## Troubleshooting
