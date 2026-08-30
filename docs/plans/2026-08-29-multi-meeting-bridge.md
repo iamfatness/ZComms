@@ -1,16 +1,18 @@
+﻿> **RULED OUT (owner, 2026-08-30):** not possible -- the Zoom SDK is a machine-wide singleton (SDKERR_OTHER_SDK_INSTANCE_RUNNING, error 14, proven repeatedly on this rig). One process cannot host two meetings and two processes cannot share the machine. Kept for the record; do not implement.
+
 # Multi-Meeting Talkback Bridge: Feasibility Spike First, Two-Process Architecture Second
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 ## Goal
 
-Determine — by spike, before any product code — whether one Windows machine can hold SDK clients in two Zoom meetings at once (production meeting + comms meeting), and, contingent on the answer, build a two-process talkback bridge that carries intercom audio between the two meetings with local audio routing between the processes.
+Determine â€” by spike, before any product code â€” whether one Windows machine can hold SDK clients in two Zoom meetings at once (production meeting + comms meeting), and, contingent on the answer, build a two-process talkback bridge that carries intercom audio between the two meetings with local audio routing between the processes.
 
 ## Architecture
 
-The Windows Meeting SDK offers no multi-instance support: one `InitSDK` per process, one `CreateMeetingService` client, one joined meeting — and the live-observed `SDKERR_OTHER_SDK_INSTANCE_RUNNING` (14), triggered by an *unrelated process's* SDK engine, suggests the singleton may be machine-wide, which would kill even a two-process design on one box. So this plan is gated: **Spike C** (the spike CLAUDE.md already calls for by name) proves or refutes two processes ≙ two meetings on one machine. If it passes, the bridge is two `zcomms`-family processes — the existing desk in the production meeting, plus a headless `zcomms-bridge.exe` in the comms meeting — exchanging 20 ms PCM frames over a loopback UDP socket using a tiny sequenced frame protocol (pure, unit-tested). Each process feeds received frames into its own engine ring exactly as if they were mic capture, so pacing, limiting, and the talkback delivery laws all apply unchanged. If the spike fails, the documented fallbacks are (a) a second machine running the bridge process, or (b) no bridge — chat signaling as the cross-meeting cue path.
+The Windows Meeting SDK offers no multi-instance support: one `InitSDK` per process, one `CreateMeetingService` client, one joined meeting â€” and the live-observed `SDKERR_OTHER_SDK_INSTANCE_RUNNING` (14), triggered by an *unrelated process's* SDK engine, suggests the singleton may be machine-wide, which would kill even a two-process design on one box. So this plan is gated: **Spike C** (the spike CLAUDE.md already calls for by name) proves or refutes two processes â‰™ two meetings on one machine. If it passes, the bridge is two `zcomms`-family processes â€” the existing desk in the production meeting, plus a headless `zcomms-bridge.exe` in the comms meeting â€” exchanging 20 ms PCM frames over a loopback UDP socket using a tiny sequenced frame protocol (pure, unit-tested). Each process feeds received frames into its own engine ring exactly as if they were mic capture, so pacing, limiting, and the talkback delivery laws all apply unchanged. If the spike fails, the documented fallbacks are (a) a second machine running the bridge process, or (b) no bridge â€” chat signaling as the cross-meeting cue path.
 
-This is a deliberate, argued exception to CLAUDE.md's "no IPC layer" rule: that rule forbids IPC *on the assumption* that Zoom media apps need helpers; here two SDK singletons are the one thing a single process provably cannot hold, which is exactly the "worker-per-meeting" deferred idea in plan §3.2 — and it stays out of the product until the spike says the platform allows it.
+This is a deliberate, argued exception to CLAUDE.md's "no IPC layer" rule: that rule forbids IPC *on the assumption* that Zoom media apps need helpers; here two SDK singletons are the one thing a single process provably cannot hold, which is exactly the "worker-per-meeting" deferred idea in plan Â§3.2 â€” and it stays out of the product until the spike says the platform allows it.
 
 ## Tech Stack
 
@@ -26,26 +28,26 @@ This document doubles as the spec.
 
 ### What the vendored SDK does and does not allow (header-verified)
 
-- `InitSDK(InitParam&)` / `CleanUPSDK()` are free functions — process-global state, no handle, no instance object: **there is no multi-instance interface in the vendored SDK.** `CreateMeetingService(IMeetingService**)` creates the one meeting service; `IMeetingService::Join(JoinParam&)` joins the one meeting.
-- **Looked for and not found:** any "multi meeting", "second instance", or per-instance SDK context in any vendored header; any documented scope for `SDKERR_OTHER_SDK_INSTANCE_RUNNING` (the enum exists in `zoom_sdk_def.h`; whether it is per-process or machine-wide is exactly what Spike C measures — the 2026-08-29 live incident where OBS's ZoomObsEngine blocked `InitSDK` in zcomms is one data point that says wider-than-process, but that engine is a different SDK generation, so it is evidence, not proof).
+- `InitSDK(InitParam&)` / `CleanUPSDK()` are free functions â€” process-global state, no handle, no instance object: **there is no multi-instance interface in the vendored SDK.** `CreateMeetingService(IMeetingService**)` creates the one meeting service; `IMeetingService::Join(JoinParam&)` joins the one meeting.
+- **Looked for and not found:** any "multi meeting", "second instance", or per-instance SDK context in any vendored header; any documented scope for `SDKERR_OTHER_SDK_INSTANCE_RUNNING` (the enum exists in `zoom_sdk_def.h`; whether it is per-process or machine-wide is exactly what Spike C measures â€” the 2026-08-29 live incident where OBS's ZoomObsEngine blocked `InitSDK` in zcomms is one data point that says wider-than-process, but that engine is a different SDK generation, so it is evidence, not proof).
 - Talkback channels live *inside* one meeting (`IMeetingTalkbackController`); nothing in the SDK spans meetings. Cross-meeting audio must therefore be carried by us between two clients.
 
 ### Requirements
 
 1. **Spike C ships first and alone.** It answers, with a machine-readable verdict file: can process B `InitSDK` + `Authenticate` + `Join` meeting 2 while process A sits in meeting 1 on the same machine? Secondary: does the answer change if B starts before A joins VoIP? Both directions logged.
 2. The verdict has three named outcomes: `TWO_PROCESS_OK`, `INIT_BLOCKED` (B gets error 14), `JOIN_DEGRADED` (init passes, join or audio fails). Product work beyond Task 2 is authorized only on `TWO_PROCESS_OK`.
-3. The bridge frame protocol is pure and unit-tested: 16-bit mono 32 kHz, 640-sample (20 ms) payloads, sequence numbers, drop/duplicate/reorder tolerance, underrun-as-silence with a counted stat (never a stall — the TX pacer law).
-4. The bridge process is headless, joins the comms meeting signed-in (the auth rules apply unchanged), keys a configured talkback channel, and transmits whatever frames arrive on its socket; the desk process mirrors the reverse path. Direction one (desk → comms meeting) is the MVP; the return path reuses the same protocol on a second port.
+3. The bridge frame protocol is pure and unit-tested: 16-bit mono 32 kHz, 640-sample (20 ms) payloads, sequence numbers, drop/duplicate/reorder tolerance, underrun-as-silence with a counted stat (never a stall â€” the TX pacer law).
+4. The bridge process is headless, joins the comms meeting signed-in (the auth rules apply unchanged), keys a configured talkback channel, and transmits whatever frames arrive on its socket; the desk process mirrors the reverse path. Direction one (desk â†’ comms meeting) is the MVP; the return path reuses the same protocol on a second port.
 5. Every bridge failure is loud: socket bind failure, frame gap > 1 s, and mic-closed (accepted-but-silent law) each produce ops lines on the desk.
 6. All OS objects carry the `ZComms` prefix; the bridge binary is named `zcomms-bridge.exe` (never generic).
 
 ## Global Constraints
 
 - Build: `cmake -S . -B build`; `cmake --build build --config Release`. Tests: `build\Release\zcomms_audio_tests.exe` / `ctest --test-dir build -C Release`.
-- SDK laws in force: mic must be OPEN or sends are accepted-but-silent (the bridge's comms-meeting client must `UnmuteSelf` + auto-suppress like the desk); per-call rate limit (`SDKERR_TOO_FREQUENT_CALL`, 18) on CreateChannel and invites — the bridge pre-provisions once; stereo is silently discarded by talkback → the bridge sends mono; talkback does not cross breakout rooms; `sdk.dll` fastfails on normal `main` return → both processes exit via the established `HardExit()` pattern (`spikes/a-tx-latency/src/main.cpp`); SDK headers need `windows.h` first.
+- SDK laws in force: mic must be OPEN or sends are accepted-but-silent (the bridge's comms-meeting client must `UnmuteSelf` + auto-suppress like the desk); per-call rate limit (`SDKERR_TOO_FREQUENT_CALL`, 18) on CreateChannel and invites â€” the bridge pre-provisions once; stereo is silently discarded by talkback â†’ the bridge sends mono; talkback does not cross breakout rooms; `sdk.dll` fastfails on normal `main` return â†’ both processes exit via the established `HardExit()` pattern (`spikes/a-tx-latency/src/main.cpp`); SDK headers need `windows.h` first.
 - Same-account collision law: two clients of one account must not host-join the same PMI; the spike uses **two different signed-in accounts or one account + one `--anon` same-account guest**, meetings started per CLAUDE.md's test-meeting rules (no waiting room, 40-min limit awareness).
 - Pure modules include no SDK headers; they compile into `zcomms_audio_tests` without `sdk.lib`.
-- Update `CLAUDE.md` in the same change as any substantive work — the spike verdict especially (it settles plan §3.2's open question either way).
+- Update `CLAUDE.md` in the same change as any substantive work â€” the spike verdict especially (it settles plan Â§3.2's open question either way).
 
 ## Tasks
 
@@ -147,12 +149,12 @@ This document doubles as the spec.
   }
   ```
 - [ ] Register `TestBridgeProto` in `tests/audio/test_util.h` + `tests/audio/test_main.cpp`; add `tests/zoom/test_bridge_proto.cpp` and `src/zoom/bridge_proto.cpp` to `zcomms_audio_tests` sources in `CMakeLists.txt` (plus `target_include_directories(zcomms_audio_tests PRIVATE tests/audio src/zoom)` if not already present from a sibling plan).
-- [ ] `cmake --build build --config Release --target zcomms_audio_tests` — failing.
-- [ ] Implement `bridge_proto.cpp`: encode/decode with explicit little-endian byte writes (no struct-cast serialization — MSVC padding is not a wire format); `BridgeJitterBuffer` keeps a small `std::map<uint32_t, BridgeFrame>` window keyed by seq with a `next_seq_` cursor: `Pull` emits `next_seq_` if present (advance), else zero-fills and counts an underrun, advancing past a seq confirmed missing only once a newer seq has been seen (so a merely-late frame still plays); `Push` of a seq `< next_seq_` increments `late_drops_`.
+- [ ] `cmake --build build --config Release --target zcomms_audio_tests` â€” failing.
+- [ ] Implement `bridge_proto.cpp`: encode/decode with explicit little-endian byte writes (no struct-cast serialization â€” MSVC padding is not a wire format); `BridgeJitterBuffer` keeps a small `std::map<uint32_t, BridgeFrame>` window keyed by seq with a `next_seq_` cursor: `Pull` emits `next_seq_` if present (advance), else zero-fills and counts an underrun, advancing past a seq confirmed missing only once a newer seq has been seen (so a merely-late frame still plays); `Push` of a seq `< next_seq_` increments `late_drops_`.
 - [ ] Run `build\Release\zcomms_audio_tests.exe`; green.
 - [ ] Commit: `git add src/zoom/bridge_proto.h src/zoom/bridge_proto.cpp tests/zoom/test_bridge_proto.cpp tests/audio/test_util.h tests/audio/test_main.cpp CMakeLists.txt && git commit -m "feat(bridge): sequenced 20 ms frame protocol + jitter buffer (pure)"`
 
-### Task 2: Spike C — SDK exclusivity harness
+### Task 2: Spike C â€” SDK exclusivity harness
 
 **Files**
 - Create: `spikes/c-sdk-exclusivity/CMakeLists.txt`
@@ -183,7 +185,7 @@ This document doubles as the spec.
   std::string FormatRecord(const Observation& o);
   }
   ```
-- Consumes (SDK side, in `main.cpp` only): the existing `zc::ZoomClient` (`Init`, `Authenticate`/`AuthenticateWithJwt`, `Join`, `JoinVoip`, `Pump`, `in_meeting`, `Leave`, `Cleanup`) and `HardExit()` per the spike-a pattern; config via `local.env` exactly like `spikes/a-tx-latency` (`spikes/a-tx-latency/local.env.example` is the template — copy the loading code from `spikes/a-tx-latency/src/config.{h,cpp}`).
+- Consumes (SDK side, in `main.cpp` only): the existing `zc::ZoomClient` (`Init`, `Authenticate`/`AuthenticateWithJwt`, `Join`, `JoinVoip`, `Pump`, `in_meeting`, `Leave`, `Cleanup`) and `HardExit()` per the spike-a pattern; config via `local.env` exactly like `spikes/a-tx-latency` (`spikes/a-tx-latency/local.env.example` is the template â€” copy the loading code from `spikes/a-tx-latency/src/config.{h,cpp}`).
 
 **Steps**
 
@@ -223,14 +225,14 @@ This document doubles as the spec.
              std::string::npos);
   }
   ```
-- [ ] `spikes/c-sdk-exclusivity/CMakeLists.txt`: a `spike_c_tests` exe from `tests/*.cpp` + `src/verdict.cpp` (always built; include dir `../a-tx-latency/tests` is NOT reused — copy `test_util.h`'s pattern into this spike's `tests/`), plus the `spike-c` exe from `src/main.cpp` + `src/verdict.cpp` linked against `zcomms_zoom`, guarded by `if(TARGET zcomms_zoom)`. Register `add_test(NAME spike_c_tests COMMAND spike_c_tests)`.
-- [ ] Build to failure, implement `verdict.cpp` (the truth table above; `FormatRecord` with `snprintf`), rerun `ctest --test-dir build -C Release -R spike_c_tests` — green.
-- [ ] Implement `src/main.cpp` roles: `spike-c --role a --meeting <n1>` (init, auth, join, `JoinVoip`, then pump forever printing a heartbeat), `spike-c --role b --meeting <n2>` (init → record error code → if ok: auth, join, hold 30 s, leave; append `FormatRecord` to `verdict.txt` in the CWD) — both exiting via `HardExit()`.
+- [ ] `spikes/c-sdk-exclusivity/CMakeLists.txt`: a `spike_c_tests` exe from `tests/*.cpp` + `src/verdict.cpp` (always built; include dir `../a-tx-latency/tests` is NOT reused â€” copy `test_util.h`'s pattern into this spike's `tests/`), plus the `spike-c` exe from `src/main.cpp` + `src/verdict.cpp` linked against `zcomms_zoom`, guarded by `if(TARGET zcomms_zoom)`. Register `add_test(NAME spike_c_tests COMMAND spike_c_tests)`.
+- [ ] Build to failure, implement `verdict.cpp` (the truth table above; `FormatRecord` with `snprintf`), rerun `ctest --test-dir build -C Release -R spike_c_tests` â€” green.
+- [ ] Implement `src/main.cpp` roles: `spike-c --role a --meeting <n1>` (init, auth, join, `JoinVoip`, then pump forever printing a heartbeat), `spike-c --role b --meeting <n2>` (init â†’ record error code â†’ if ok: auth, join, hold 30 s, leave; append `FormatRecord` to `verdict.txt` in the CWD) â€” both exiting via `HardExit()`.
 - [ ] Live run (the spike's whole point; needs two meetings started per the same-account collision rules): run A into meeting 1; run B into meeting 2; then the reverse order (B first, A second) with `b_started_first=true`. Append both records; note in the README whether OBS/CoreVideo engines were confirmed dead first (`SdkConflictHint()`'s known-hosts list is the sweep checklist).
-- [ ] Record the verdict in `CLAUDE.md` (this closes the "Spike C should test it directly" item and plan §3.2's open question) and in `spikes/c-sdk-exclusivity/README.md` with the raw records.
+- [ ] Record the verdict in `CLAUDE.md` (this closes the "Spike C should test it directly" item and plan Â§3.2's open question) and in `spikes/c-sdk-exclusivity/README.md` with the raw records.
 - [ ] Commit: `git add spikes/c-sdk-exclusivity CMakeLists.txt CLAUDE.md && git commit -m "feat(spike-c): two-process SDK exclusivity harness + live verdict"`
 
-### Task 3: `zcomms-bridge.exe` — comms-meeting leg (GATED on TWO_PROCESS_OK)
+### Task 3: `zcomms-bridge.exe` â€” comms-meeting leg (GATED on TWO_PROCESS_OK)
 
 **Files**
 - Create: `src/bridge/main.cpp`
@@ -273,11 +275,11 @@ This document doubles as the spec.
 
 **Steps**
 
-- [ ] Confirm `verdict.txt` says `TWO_PROCESS_OK`; if not, stop here and file the fallback decision (second machine vs chat-signaling-only) as a follow-up plan — do not build the bridge against a refuted platform.
+- [ ] Confirm `verdict.txt` says `TWO_PROCESS_OK`; if not, stop here and file the fallback decision (second machine vs chat-signaling-only) as a follow-up plan â€” do not build the bridge against a refuted platform.
 - [ ] Implement `UdpFramePort` (plain blocking socket with `SO_RCVTIMEO` for the timeout; every failure fills `*error` with `WSAGetLastError()`).
-- [ ] Implement `src/bridge/main.cpp`: parse `--meeting <n> --port 7361 --channel-name <label>`; sign-in credentials via the same `local.env`/broker path as the desk (headless is fine for scripted runs under `--anon` per the auth rules); join, `UnmuteSelf`, install the auto-suppress virtual mic; `CreateChannels(1)`; run the TX pacer with a `FrameSink` whose `OnFrame` pulls `BridgeJitterBuffer::Pull` output — the receive thread just `Recv`s and `Push`es. Frame-gap watchdog: no frame for 1 s → printf ops line + send silence (never stall). Exit via `HardExit()`.
+- [ ] Implement `src/bridge/main.cpp`: parse `--meeting <n> --port 7361 --channel-name <label>`; sign-in credentials via the same `local.env`/broker path as the desk (headless is fine for scripted runs under `--anon` per the auth rules); join, `UnmuteSelf`, install the auto-suppress virtual mic; `CreateChannels(1)`; run the TX pacer with a `FrameSink` whose `OnFrame` pulls `BridgeJitterBuffer::Pull` output â€” the receive thread just `Recv`s and `Push`es. Frame-gap watchdog: no frame for 1 s â†’ printf ops line + send silence (never stall). Exit via `HardExit()`.
 - [ ] Desk side (one small `main.cpp` change, kept behind `--bridge-to <port>`): a second `FrameSink` tee after the PTT envelope sends every frame to `UdpFramePort::Send` when a new `BRIDGE` key is latched.
-- [ ] Build both targets: `cmake --build build --config Release --target zcomms zcomms-bridge`; run `build\Release\zcomms_audio_tests.exe` — green.
+- [ ] Build both targets: `cmake --build build --config Release --target zcomms zcomms-bridge`; run `build\Release\zcomms_audio_tests.exe` â€” green.
 - [ ] Live gate (two meetings, matched-filter e2e): desk in meeting 1 with `--test-signal --bridge-to 7361`, bridge in meeting 2, a native listener in the bridge channel of meeting 2, `zcomms-tap` at the listener. Detection at the listener = the bridge exists; record latency medians with the spike-a bracket discipline (no number quoted without `--self-test` first).
 - [ ] Update `CLAUDE.md` ("multi-meeting bridge" section: the spike verdict, the IPC-exception rationale, ports, and the live result).
 - [ ] Commit: `git add src/bridge CMakeLists.txt src/app/main.cpp CLAUDE.md && git commit -m "feat(bridge): zcomms-bridge comms-meeting leg over loopback UDP (spike-gated)"`
@@ -289,3 +291,4 @@ This document doubles as the spec.
 - [ ] No SDK or winsock includes in `bridge_proto.*`; winsock confined to `udp_frame_port.cpp`.
 - [ ] Both processes exit through `HardExit()`; no bare `return` from `main` in SDK-linked binaries.
 - [ ] The IPC exception is argued against CLAUDE.md's rule in prose, not slipped in silently.
+
