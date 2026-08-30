@@ -97,6 +97,9 @@ if(EXISTS "${ZOOM_SDK_DIR}/lib/sdk.lib")
     src/zoom/breakout.cpp
     src/zoom/room_plan.cpp
     src/zoom/reach.cpp
+    src/zoom/signal_protocol.cpp
+    src/zoom/signal_outbox.cpp
+    src/zoom/chat_signals.cpp
     src/zoom/jwt.cpp
   )
   target_link_libraries(zcomms_zoom PUBLIC zcomms_audio "${ZOOM_SDK_DIR}/lib/sdk.lib")
