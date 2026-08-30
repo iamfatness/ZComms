@@ -44,6 +44,7 @@
 #include "frame_ring.h"
 #include "generator.h"
 #include "breakout.h"
+#include "chat_signals.h"
 #include "reach.h"
 #include "room_plan.h"
 #include "roster.h"
@@ -386,6 +387,8 @@ int Run(int argc, char** argv) {
   std::vector<std::pair<int, bool>> latch_edges;
   std::vector<std::tuple<int, unsigned int, bool>> assign_edges;
   std::vector<std::string> bo_cmds;
+  std::vector<std::pair<int, bool>> cue_edges;  // chat cue signals to a slot
+  std::vector<int> notify_edges;                // assignment notices to a slot
   std::mutex join_m;
   std::string join_pending;
   std::string passcode_pending;
@@ -447,6 +450,14 @@ int Run(int argc, char** argv) {
           } else if (verb == "room") {
             std::lock_guard<std::mutex> lock(dev_m);
             room_pending = arg;
+          } else if (verb == "cue") {
+            // Structured cue signal to every member of a slot's channel.
+            std::lock_guard<std::mutex> lock(edge_m);
+            cue_edges.emplace_back(std::atoi(a1.c_str()), a2 == "on");
+          } else if (verb == "notify") {
+            // Human-readable you-are-on-channel notice, private chat.
+            std::lock_guard<std::mutex> lock(edge_m);
+            notify_edges.push_back(std::atoi(a1.c_str()));
           } else if (verb == "bo") {
             // Sub-production commands, parsed on the main thread:
             //   bo layout <room>:<p>,<p>;<room>:<p>   bo apply
@@ -728,6 +739,35 @@ int Run(int argc, char** argv) {
   // static -- per-meeting state dies with the meeting.
   RoomLayout desired;
 
+  // Chat as the data side-channel: cues between desks, assignment notices
+  // to talent on stock Zoom clients, fallback signaling when talkback is
+  // down. The sender id is resolved to a NAME at callback time and never
+  // stored (ids are meeting-scoped).
+  ChatSignals chat;
+  chat.Attach(zoom.GetChatController(),
+              [&](const SignalMsg& m, unsigned int sender_id) {
+                std::string who = "user " + std::to_string(sender_id);
+                for (const RosterMember& r : roster.others()) {
+                  if (r.user_id == sender_id) { who = r.name; break; }
+                }
+                switch (m.kind) {
+                  case SignalKind::kCue:
+                    log_op("cue from " + who + ": CH " +
+                           std::to_string(m.slot + 1) + (m.on ? " ON" : " off"));
+                    break;
+                  case SignalKind::kFallback:
+                    log_op(who + (m.on ? ": talkback down -- cues via chat"
+                                       : ": talkback restored"));
+                    break;
+                  case SignalKind::kAssign:
+                    log_op(who + " assigned " + m.channel_name);
+                    break;
+                  case SignalKind::kHello:
+                    log_op(who + " is on the signaling net");
+                    break;
+                }
+              });
+
   // --- Channel bring-up (host/co-host retry, as proven in the spike) --------
   const int n_channels =
       cfg.channels < 1 ? 1
@@ -736,7 +776,11 @@ int Run(int argc, char** argv) {
                               : cfg.channels);
   TalkbackChannels bank(zoom.GetTalkbackController());
   if (!bank.meeting_supports_talkback()) {
-    log_op("this meeting does not support talkback");
+    log_op("this meeting does not support talkback -- cues via chat");
+    // Requirement: when talkback is unavailable, chat becomes the cue
+    // path -- tell every desk before leaving (one paced flush).
+    chat.BroadcastFallback(true);
+    chat.Tick(NowNs() / 1'000'000);
     zoom.Leave();
     zoom.Cleanup();
     return -1;
@@ -773,6 +817,8 @@ int Run(int argc, char** argv) {
   }
   if (!created) {
     log_op("could not create talkback channels (never granted host/co-host?)");
+    chat.BroadcastFallback(true);
+    chat.Tick(NowNs() / 1'000'000);
     zoom.Leave();
     zoom.Cleanup();
     return -1;
@@ -893,6 +939,7 @@ int Run(int argc, char** argv) {
     if (end_ns != 0 && NowNs() >= end_ns) break;
     heartbeat_ns.store(NowNs());
     zoom.Pump(30);
+    chat.Tick(NowNs() / 1'000'000);
 
     // Host duties + membership healing, on a coarse cadence. Invite anyone
     // not yet invited who supports talkback (the web client does not --
@@ -974,6 +1021,10 @@ int Run(int argc, char** argv) {
           if (pick >= 0) {
             intent.insert({pick, m.user_id});
             log_op(m.name + " -> CH " + std::to_string(pick + 1));
+            // The path that reaches talent on stock Zoom clients: a
+            // private, human-readable notice of where their ear is.
+            chat.SendAssignNotice(m.user_id, m.name,
+                                  "CH " + std::to_string(pick + 1));
           }
         }
       }
@@ -1073,6 +1124,49 @@ int Run(int argc, char** argv) {
       for (const auto& [slot, uid, on] : aedges) {
         if (on) intent.insert({slot, uid});
         else intent.erase({slot, uid});
+      }
+    }
+
+    // Chat cue/notify edges from the panel: slot -> members -> queued,
+    // paced chat sends. Names resolve at send time through the roster.
+    {
+      std::vector<std::pair<int, bool>> cedges;
+      std::vector<int> nedges;
+      {
+        std::lock_guard<std::mutex> lock(edge_m);
+        cedges.swap(cue_edges);
+        nedges.swap(notify_edges);
+      }
+      if (!cedges.empty() || !nedges.empty()) {
+        const std::vector<ChannelState> csnap = bank.Snapshot();
+        for (const auto& [slot, on] : cedges) {
+          if (slot < 0 || slot >= static_cast<int>(csnap.size())) continue;
+          SignalMsg sm;
+          sm.kind = SignalKind::kCue;
+          sm.slot = slot;
+          sm.on = on;
+          sm.from = cfg.display_name;
+          for (const unsigned int uid : csnap[static_cast<size_t>(slot)].members) {
+            chat.SendSignalTo(uid, sm);
+          }
+          log_op("cue " + std::string(on ? "ON" : "off") + " -> CH " +
+                 std::to_string(slot + 1) + " (" +
+                 std::to_string(csnap[static_cast<size_t>(slot)].members.size()) +
+                 " member(s))");
+        }
+        for (const int slot : nedges) {
+          if (slot < 0 || slot >= static_cast<int>(csnap.size())) continue;
+          const std::string ch_name = "CH " + std::to_string(slot + 1);
+          int sent = 0;
+          for (const RosterMember& m : roster.others()) {
+            if (csnap[static_cast<size_t>(slot)].members.count(m.user_id)) {
+              chat.SendAssignNotice(m.user_id, m.name, ch_name);
+              ++sent;
+            }
+          }
+          log_op("assignment notice -> " + ch_name + " (" +
+                 std::to_string(sent) + " member(s))");
+        }
       }
     }
 
