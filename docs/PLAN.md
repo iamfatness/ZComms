@@ -1,5 +1,13 @@
 # ZComms — standalone intercom on the Zoom Meeting SDK
 
+> **Status 2026-08-30: largely executed — v0.1.0 is shipped**
+> (installer on GitHub Releases). This document is kept for the reasoning;
+> the living state (architecture as built, invariants, and the live-found
+> platform laws: mic-open delivery, breakout-room scope, per-call rate
+> limits, same-account collisions, auth-tier entitlements) is in the repo's
+> `CLAUDE.md`. Still open from §here: code signing, ZComms' own Marketplace
+> identity, Spikes B–D remainders, macOS.
+
 Status: **design, post-Spike-A.** Written 2026-08-25; reworked 2026-08-26
 after Spike A ran against a live meeting and its result reshaped the
 architecture (§9 carries the numbers). ZComms is a **standalone product**: its

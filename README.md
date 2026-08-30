@@ -1,46 +1,81 @@
 # ZComms
 
-Standalone intercom for live production, built on the Zoom Meeting SDK.
-Channels, groups, push-to-talk, and — the part no incumbent offers — a native
-Zoom leg, so a remote Zoom guest sits on the party line without virtual audio
-cables or a spare machine.
+Talkback / IFB station for Zoom. Push a key, your voice lands in one
+panelist's ear — the meeting, the recording, and the room hear nothing.
 
-**Status: design. No code yet.** Read [`docs/PLAN.md`](docs/PLAN.md) first — it
-argues what the Meeting SDK will and will not let this product be, and gates
-the engineering behind four cheap spikes. The decisive one is TX round-trip
-latency measured against a real meeting; above roughly 250 ms one-way, the
-Zoom-transport thesis is dead for live crew and the phasing changes.
+Built for live production: a director briefing talent inside the client's
+Zoom meeting, with the visual language and fail-closed discipline of a
+hardware intercom panel. No virtual audio cables, no spare machine, no bot
+account — ZComms joins the meeting as you.
 
-## Shape
+**Status: v0.1.0 shipped.** Grab the installer from
+[Releases](https://github.com/iamfatness/ZComms/releases) — per-user, no
+admin rights needed. The build is not yet code-signed, so SmartScreen warns
+on first run ("More info → Run anyway").
 
-ZComms links the Zoom Meeting SDK directly. There is no helper process and no
-IPC layer in Phase 1 — the app *is* the client. Multi-channel adds one small
-worker per channel, because the SDK is a per-process singleton and a Zoom
-meeting is a channel.
+## What it does
+
+- **Sign in with Zoom once** (browser PKCE); every join happens as your
+  account. Paste any meeting link or ID into the panel.
+- **A named key per panelist.** Each capable participant automatically gets
+  their own standing talkback channel — their key wears their name, and a
+  press is a private line. **ALL CALL** spans the whole panel; **latch**
+  makes presses stick; **Edit Talent** builds group channels.
+- **The room stays clean.** The meeting mic is auto-suppressed: open (Zoom
+  requires that for talkback delivery) but silent to the meeting — pure SDK
+  API, no audio driver installed.
+- **Honest keys.** A key is red only while someone is actually hearing you.
+  Keyed with nobody in the channel reads amber with "nobody in channel";
+  someone in another breakout room shows dark with "in <room>" and refuses
+  the press, because Zoom talkback cannot cross rooms. The station can move
+  itself between rooms (Settings → Station Room).
+- **A real capture chain**: input gain, look-ahead limiter, ramped PTT
+  envelope, echo cancellation (speexdsp), sidetone, a built-in test tone,
+  and device pickers that switch live.
+- **Local control surface**: the panel is served on `127.0.0.1:7350` with an
+  SSE state stream and a one-line action API — the same seam a Stream Deck /
+  Companion module drives.
+
+## What panelists need
+
+A native Zoom client (desktop or mobile). The Zoom **web** client cannot
+receive talkback; the panel marks such people `NO TALKBACK`. Nothing to
+install on their side — a plain Zoom client hears channel audio natively.
+
+## Platform truths (the SDK's rules, surfaced honestly)
+
+- Channel creation needs ZComms promoted to **host or co-host**; as host it
+  also admits your panelists from the waiting room.
+- Talkback **does not cross breakout rooms** — the panel says so per person
+  instead of pretending.
+- Meetings hosted by Zoom accounts that never authorized the app are refused
+  by Zoom at join; the panel names it.
+- Your account can't be hosting a meeting on another device while ZComms
+  joins as you — ZComms declines to end it and says why.
+
+## Building from source
+
+Windows x64, Visual Studio 2022, CMake ≥3.20.
 
 ```
-Phase 1   one process   → one meeting  = one channel
-Phase 2   UI + N workers → N meetings  = N channels
-Phase 3   + a native low-latency fabric, Zoom as one leg on it
+cmake -S . -B build -A x64
+cmake --build build --config Release --target zcomms
 ```
 
-## Before the first build
+The Zoom Meeting SDK is **not redistributable in a source tree**:
+`third_party/zoom-sdk/` is gitignored and must be populated with the Windows
+Meeting SDK (7.1.5+) before the `zcomms` target builds. Without it, the
+audio engine, tests, and tools still build. The WebView2 SDK fetches itself
+at configure time. `tools/release.ps1` builds, tests, stages, zips, and
+produces the NSIS installer.
 
-Two things gate shipping rather than coding, and both have lead time:
+`CLAUDE.md` is the living engineering state — architecture, invariants, and
+the live-found platform behaviors with their receipts. `docs/PLAN.md` is the
+original architecture plan, kept for the reasoning.
 
-1. **A Zoom Marketplace app identity** — a General app with user-managed OAuth
-   and Meeting SDK / Embed enabled, its own client id, public app key and
-   redirect URI, plus a broker endpoint so no end user ever types app
-   credentials. Start the review before Phase 1 code lands.
-2. **The Meeting SDK itself** — not redistributable in a public repo, so
-   `third_party/zoom-sdk/` is gitignored and CI fetches it at build time from a
-   private release asset on this repository. Settle that step before the first
-   CI run.
+## Roadmap
 
-## Layout
-
-```
-docs/PLAN.md    the architecture, phasing and admin-model decision
-```
-
-Everything else arrives with Phase 1.
+Code signing (pending a Microsoft developer account), ZComms' own Zoom
+Marketplace identity (guest join + raw-data entitlement — both requirements
+now proven), live verification of breakout awareness, and a macOS port (the
+panel is one HTML file; the shell is thin).
