@@ -259,7 +259,10 @@ function buildGrid(rows){
       const setHeld=v=>{if(held===v)return;held=v;act('talk',r.slot+' '+(v?'on':'off'));};
       b.addEventListener('pointerdown',e=>{
         const c=(S.channels||[])[r.slot]||{};
-        if(c.room)return;  // fail closed: talkback cannot cross rooms
+        // Fail closed: talkback cannot cross rooms -- refuse a key whose
+        // whole population is elsewhere.
+        const unreach=c.reach&&c.reach.ok.length===0&&c.reach.dark.length>0;
+        if(c.room||unreach)return;
         if(latchMode){act('latch',r.slot+' '+(c.latched?'off':'on'));return;}
         b.setPointerCapture(e.pointerId);setHeld(true);});
       b.addEventListener('pointerup',()=>setHeld(false));
@@ -277,25 +280,33 @@ function updateGrid(){
   cells.forEach(c=>{
     if(c.row.off){c.st.textContent='no talkback';return;}
     const ch=(S.channels||[])[c.row.slot]||{};
-    if(ch.room){
+    const reach=ch.reach||null;
+    const unreach=reach&&reach.ok.length===0&&reach.dark.length>0;
+    if(ch.room||unreach){
       // Cross-room: unreachable from here, and the cell says where they are.
       c.el.classList.add('off');
       c.el.classList.remove('hot','armed','ready');
-      c.st.textContent='in '+ch.room;
+      c.st.textContent=unreach?(reach.dark.length===1
+          ?('in '+(reach.dark[0][1]||'main'))
+          :'all in other rooms')
+        :('in '+ch.room);
       return;
     }
     c.el.classList.remove('off');
+    // A group with part of its membership elsewhere stays keyable but
+    // says who is missing.
+    const partial=reach&&reach.dark.length>0?(' · '+reach.dark.length+' elsewhere'):'';
     const hearing=ch.listeners>0;
     c.el.classList.toggle('hot',!!ch.keyed&&hearing);
     c.el.classList.toggle('armed',(!!ch.keyed&&!hearing)||(!ch.keyed&&!!ch.latched===false&&false));
     c.el.classList.toggle('ready',!ch.keyed&&hearing);
     c.el.setAttribute('aria-pressed',!!ch.keyed);
-    c.st.textContent=
+    c.st.textContent=(
       ch.keyed&&hearing?(ch.latched?'on air · latched':'on air')
       :ch.keyed?'nobody in channel'
       :!ch.ready?'forming…'
       :c.row.group?(ch.listeners+' listening')
-      :hearing?'ready':'invite in flight';
+      :hearing?'ready':'invite in flight')+partial;
   });
 }
 

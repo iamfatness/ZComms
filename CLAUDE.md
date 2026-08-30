@@ -215,6 +215,34 @@ spillover past 16 goes to the least-loaded channel; a partial grant proceeds
 after three rounds. Panel: ALL CALL + LATCH ALL (verbs `talkall`/`latchall`),
 empty spares hidden, chips = in-use channels + one spare.
 
+### Sub-production rooms (2026-08-30, plan docs/plans/2026-08-29-breakout-subproduction-comms.md)
+
+Programmatic breakout staffing for sub-productions (green room, per-segment
+crews). Shape: a PURE planner `PlanRooms` (`src/zoom/room_plan.{h,cpp}` --
+also now owns the SDK-free `BreakoutState`/`BreakoutRoomInfo` structs) diffs
+a desired layout against the live state into ordered actions; a PURE
+`ReachFor` (`src/zoom/reach.{h,cpp}` -- owns `RoomOfName`, the ONE
+room-resolution rule; `BreakoutRooms::RoomOf` delegates) splits each
+channel's membership into reachable-now vs present-but-elsewhere. SDK glue
+is confined to `breakout.cpp`: `CreateRooms` (ONE batch transaction per
+pass -- the talkback rate-limit lesson preemptively), `AssignByName`
+(pre-start `AssignUserToBO`, running `AssignNewUserToRunningBO` /
+`SwitchAssignedUserToRunningBO`; all name-resolved via IBOData),
+`StartSession`/`StopSession`, all async-confirmed via
+IBOCreatorEvent/IBOAdminEvent; IBODataEvent's change callbacks feed
+`ConsumeRoomsDirty`. Panel verbs: `bo layout <room>:<p>,<p>;<room>:<p>` /
+`bo apply` / `bo start` / `bo stop`. Re-provisioning is FLUSH-AND-CONVERGE:
+any room transition clears `invite_backoff` + forces an immediate healer
+pass (cross-room invites already skipped), never a second membership
+engine. Channels publish `reach {ok[],dark[[name,room]]}`; a cell whose
+whole population is elsewhere goes dark and refuses the press; a partial
+group stays keyable with "N elsewhere"; keyed-unreachable logs an ops line.
+Rights honesty: creator/admin only via rights callbacks; every verb names
+the missing right. **Live checklist NOT yet run** (needs a breakout
+production): create+staff two rooms from the panel; member moves -> dark
+cell within one pass, no WRONG_USAGE; return -> re-invite + audible
+delivery; `bo stop` -> all-reachable.
+
 ### Signed-in joins: the CoreVideo auth pattern (2026-08-29)
 
 Owner rule: **no anonymous joins** -- ZComms follows CoreVideo's auth shape.
