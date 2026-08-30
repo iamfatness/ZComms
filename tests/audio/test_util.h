@@ -62,3 +62,5 @@ void TestFrameAccumulator();
 void TestSampleRing();
 void TestFrameRing();
 void TestAec();
+void TestRoomPlan();
+void TestReach();

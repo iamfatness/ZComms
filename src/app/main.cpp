@@ -44,6 +44,8 @@
 #include "frame_ring.h"
 #include "generator.h"
 #include "breakout.h"
+#include "reach.h"
+#include "room_plan.h"
 #include "roster.h"
 #include "signal.h"
 #include "talkback_channels.h"
@@ -383,6 +385,7 @@ int Run(int argc, char** argv) {
   std::mutex edge_m;
   std::vector<std::pair<int, bool>> latch_edges;
   std::vector<std::tuple<int, unsigned int, bool>> assign_edges;
+  std::vector<std::string> bo_cmds;
   std::mutex join_m;
   std::string join_pending;
   std::string passcode_pending;
@@ -444,6 +447,12 @@ int Run(int argc, char** argv) {
           } else if (verb == "room") {
             std::lock_guard<std::mutex> lock(dev_m);
             room_pending = arg;
+          } else if (verb == "bo") {
+            // Sub-production commands, parsed on the main thread:
+            //   bo layout <room>:<p>,<p>;<room>:<p>   bo apply
+            //   bo start                              bo stop
+            std::lock_guard<std::mutex> lock(edge_m);
+            bo_cmds.push_back(arg);
           } else if (verb == "setmic") {
             // Device names carry spaces; the whole argument is the name.
             std::lock_guard<std::mutex> lock(dev_m);
@@ -715,6 +724,9 @@ int Run(int argc, char** argv) {
   bo.Attach(zoom.GetBOController());
   BreakoutState bo_state;
   std::string prev_room = "\x01";  // impossible value forces the first log
+  // The operator's desired sub-production layout. Session-scoped, never
+  // static -- per-meeting state dies with the meeting.
+  RoomLayout desired;
 
   // --- Channel bring-up (host/co-host retry, as proven in the spike) --------
   const int n_channels =
@@ -1064,6 +1076,99 @@ int Run(int argc, char** argv) {
       }
     }
 
+    // Sub-production commands (bo layout / apply / start / stop). The
+    // layout is declared once; `apply` runs ONE convergence pass through
+    // the planner -- creates batched into a single transaction, assigns
+    // by name -- and is safe to run repeatedly (idempotent by design).
+    {
+      std::vector<std::string> cmds;
+      {
+        std::lock_guard<std::mutex> lock(edge_m);
+        cmds.swap(bo_cmds);
+      }
+      const auto trim = [](std::string s) {
+        const auto b = s.find_first_not_of(" \t");
+        const auto e = s.find_last_not_of(" \t");
+        return b == std::string::npos ? std::string()
+                                      : s.substr(b, e - b + 1);
+      };
+      for (const std::string& cmd : cmds) {
+        const auto sp = cmd.find(' ');
+        const std::string sub =
+            sp == std::string::npos ? cmd : cmd.substr(0, sp);
+        const std::string rest =
+            sp == std::string::npos ? "" : cmd.substr(sp + 1);
+        if (sub == "layout") {
+          // <room>:<person>,<person>;<room>:<person>
+          desired.rooms.clear();
+          size_t at = 0;
+          while (at <= rest.size()) {
+            size_t semi = rest.find(';', at);
+            if (semi == std::string::npos) semi = rest.size();
+            const std::string part = rest.substr(at, semi - at);
+            const size_t colon = part.find(':');
+            if (colon != std::string::npos) {
+              std::vector<std::string> members;
+              size_t m = colon + 1;
+              while (m <= part.size()) {
+                size_t comma = part.find(',', m);
+                if (comma == std::string::npos) comma = part.size();
+                const std::string name = trim(part.substr(m, comma - m));
+                if (!name.empty()) members.push_back(name);
+                m = comma + 1;
+              }
+              const std::string room = trim(part.substr(0, colon));
+              if (!room.empty()) desired.rooms.emplace_back(room, members);
+            }
+            at = semi + 1;
+          }
+          log_op("bo: layout staged -- " +
+                 std::to_string(desired.rooms.size()) +
+                 " room(s); run 'bo apply'");
+        } else if (sub == "apply") {
+          bo_state = bo.Snapshot();
+          const std::vector<RoomAction> plan = PlanRooms(desired, bo_state);
+          std::vector<std::string> creates;
+          bool need_start = false;
+          for (const RoomAction& a : plan) {
+            if (a.kind == RoomActionKind::kCreateRoom) creates.push_back(a.arg1);
+            if (a.kind == RoomActionKind::kNeedStart) need_start = true;
+          }
+          if (!creates.empty() && !bo.CreateRooms(creates, &err)) {
+            log_op("bo: create failed: " + err);
+          }
+          for (const RoomAction& a : plan) {
+            const bool assign = a.kind == RoomActionKind::kAssignUser ||
+                                a.kind == RoomActionKind::kAssignRunning ||
+                                a.kind == RoomActionKind::kSwitchRunning;
+            if (assign && !bo.AssignByName(a.arg1, a.arg2, bo_state.started,
+                                           &err)) {
+              log_op("bo: " + a.arg1 + " -> " + a.arg2 + " failed: " + err);
+            }
+          }
+          if (need_start) log_op("bo: layout staged -- run 'bo start'");
+          if (plan.empty()) log_op("bo: layout converged");
+        } else if (sub == "start") {
+          if (!bo.StartSession(&err)) log_op("bo: start failed: " + err);
+        } else if (sub == "stop") {
+          if (!bo.StopSession(&err)) log_op("bo: stop failed: " + err);
+        } else {
+          log_op("bo: unknown command '" + sub + "'");
+        }
+      }
+    }
+
+    // Room-world stale-flush (delivery law #2): ANY room transition -- the
+    // station's, a member's, a start/stop -- re-provisions talkback
+    // membership within one healer pass. Cross-room invites are already
+    // skipped, so re-provisioning is flush-and-converge, not a second
+    // membership engine.
+    if (bo.ConsumeRoomsDirty()) {
+      bo_state = bo.Snapshot();
+      invite_backoff.clear();
+      next_heal_ns = 0;  // heal NOW
+    }
+
     // Publish the panel state. Built every tick and cheap; the server samples
     // it at its own cadence, so a slow tab costs nothing here.
     if (ui && NowNs() >= next_dev_ns) {
@@ -1174,6 +1279,35 @@ int Run(int argc, char** argv) {
         j += "{\"name\":\"" + JsonEscape(c.name) + "\",";
         j += "\"label\":\"" + JsonEscape(lbl) + "\",";
         j += "\"room\":\"" + JsonEscape(room_of(lbl)) + "\",";
+        // Reach truth per channel: who can hear a key RIGHT NOW, and who
+        // is present-but-elsewhere (rendered dark with their room).
+        {
+          std::vector<std::string> member_names;
+          std::set<unsigned int> mids = c.members;
+          for (const auto& iv : intent) {
+            if (iv.first == s) mids.insert(iv.second);
+          }
+          for (const unsigned int id : mids) {
+            const auto it = names.find(id);
+            if (it != names.end()) member_names.push_back(it->second);
+          }
+          const ChannelReach cr = ReachFor(bo_state, member_names);
+          j += "\"reach\":{\"ok\":[";
+          bool f1 = true;
+          for (const std::string& n : cr.reachable) {
+            if (!f1) j += ",";
+            f1 = false;
+            j += "\"" + JsonEscape(n) + "\"";
+          }
+          j += "],\"dark\":[";
+          f1 = true;
+          for (const auto& [n, rm] : cr.elsewhere) {
+            if (!f1) j += ",";
+            f1 = false;
+            j += "[\"" + JsonEscape(n) + "\",\"" + JsonEscape(rm) + "\"]";
+          }
+          j += "]},";
+        }
         j += std::string("\"ready\":") + (c.ready ? "true," : "false,");
         j += "\"listeners\":" + std::to_string(c.listeners) + ",";
         j += std::string("\"keyed\":") +
@@ -1294,7 +1428,23 @@ int Run(int argc, char** argv) {
       const std::vector<ChannelState> ks = bank.Snapshot();
       for (int s = 0; s < n_channels && s < static_cast<int>(ks.size()); ++s) {
         if (((newly_keyed >> s) & 1u) == 0) continue;
-        if (!ks[static_cast<size_t>(s)].members.empty()) continue;
+        if (!ks[static_cast<size_t>(s)].members.empty()) {
+          // Members exist -- but membership does not equal reach (law #2):
+          // a channel whose whole population sits in other rooms is as
+          // silent as an empty one, and must say so.
+          std::vector<std::string> mnames;
+          for (const RosterMember& m : roster.others()) {
+            if (ks[static_cast<size_t>(s)].members.count(m.user_id)) {
+              mnames.push_back(m.name);
+            }
+          }
+          const ChannelReach cr = ReachFor(bo_state, mnames);
+          if (cr.reachable.empty() && !cr.elsewhere.empty()) {
+            log_op("CH " + std::to_string(s + 1) +
+                   " keyed -- nobody reachable (all in other rooms)");
+          }
+          continue;
+        }
         bool meant = false;
         for (const auto& iv : intent) {
           if (iv.first == s) { meant = true; break; }
