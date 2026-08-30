@@ -16,6 +16,6 @@ namespace zc {
 #endif
 
 inline const char* kDefaultPublicAppKey = ZCOMMS_APP_KEY;
-inline const char* kAppVersion = "0.1.2";
+inline const char* kAppVersion = "0.1.3";
 
 }  // namespace zc
