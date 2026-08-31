@@ -9,6 +9,7 @@
 #include "shell_window.h"
 
 #include <windows.h>
+#include <dwmapi.h>
 #include <objbase.h>
 #include <shlobj.h>
 #include <wrl.h>
@@ -101,6 +102,8 @@ void ShellThread(std::wstring url, std::function<void()> on_closed) {
   wc.lpszClassName = L"ZCommsShell";
   wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
   wc.hbrBackground = CreateSolidBrush(RGB(0x1b, 0x1d, 0x21));  // panel iron
+  // Icon resource 1 in version.rc (tools/make-icon.py renders it).
+  wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));
   RegisterClassW(&wc);
 
   // The designed 1000x640 is logical (DIP); the window is created in
@@ -121,6 +124,13 @@ void ShellThread(std::wstring url, std::function<void()> on_closed) {
     CoUninitialize();
     return;
   }
+  // Dark native title bar (the default one is white against a dark panel).
+  // Attribute 20 = DWMWA_USE_IMMERSIVE_DARK_MODE on Win10 20H1+; on older
+  // builds the call fails harmlessly and the bar stays light. Set before
+  // ShowWindow so the first paint is already dark.
+  const BOOL dark = TRUE;
+  DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark,
+                        sizeof(dark));
   ShowWindow(hwnd, SW_SHOW);
 
   CreateCoreWebView2EnvironmentWithOptions(
