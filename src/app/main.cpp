@@ -27,12 +27,15 @@
 #include <algorithm>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
+#include <typeinfo>
 #include <vector>
 
 #include "app_identity.h"
 #include "audio_defs.h"
+#include "crash_trap.h"
 #include "clock.h"
 #include "control_server.h"
 #include "zoom_oauth.h"
@@ -420,6 +423,18 @@ int Run(int argc, char** argv) {
     else if (a == "--anon") cfg.anon = true;
     else if (a == "--open") cfg.open_browser = true;
     else if (a == "--no-open") cfg.open_browser = false;
+    else if (a == "--selftest-crash") {
+      // Hidden (not in usage): proves the crash trap end-to-end -- FATAL
+      // line in the log AND the message box -- on any machine, including
+      // one where only the screen can leave the room.
+      const std::string mode = next("--selftest-crash");
+      std::printf("[crash-trap] selftest: %s\n", mode.c_str());
+      if (mode == "throw") throw std::out_of_range("crash-trap selftest");
+      if (mode == "abort") std::abort();
+      if (mode == "av") *static_cast<volatile int*>(nullptr) = 1;
+      std::printf("ERROR: --selftest-crash takes throw|abort|av\n");
+      return 2;
+    }
     else {
       std::printf("ERROR: unknown argument %s\n\n", a.c_str());
       PrintUsage();
@@ -1836,8 +1851,20 @@ int main(int argc, char** argv) {
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   zc::BindStdio();
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  zc::InstallCrashTrap();
   timeBeginPeriod(1);
-  const int rc = zc::Run(argc, argv);
+  // Catch here rather than letting the exception escape main: an uncaught
+  // throw on this thread reaches the SEH filter as an anonymous 0xE06D7363,
+  // losing the type and what() -- and the join path runs on this thread.
+  int rc = 1;
+  try {
+    rc = zc::Run(argc, argv);
+  } catch (const std::exception& e) {
+    zc::Die(std::string("uncaught C++ exception -- ") + typeid(e).name() +
+            ": " + e.what());
+  } catch (...) {
+    zc::Die("uncaught C++ exception (not derived from std::exception)");
+  }
   timeEndPeriod(1);
   zc::HardExit(rc);
 }

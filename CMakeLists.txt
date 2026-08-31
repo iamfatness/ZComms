@@ -149,7 +149,8 @@ endif()
 # ---------------------------------------------------------------------------
 if(ZCOMMS_HAVE_SDK)
   add_executable(zcomms src/app/main.cpp src/app/control_server.cpp
-                        src/app/zoom_oauth.cpp src/app/version.rc)
+                        src/app/zoom_oauth.cpp src/app/crash_trap.cpp
+                        src/app/version.rc)
   # A real windowed app: no console of its own, ever. main() stays the entry
   # point; BindStdio() in main.cpp decides where diagnostics land (pipe,
   # parent terminal, or a log file).
@@ -219,6 +220,8 @@ add_executable(zcomms_audio_tests
   tests/zoom/test_signal_protocol.cpp
   tests/zoom/test_signal_outbox.cpp
   tests/zoom/test_duck_plan.cpp
+  tests/audio/test_crash_trap.cpp
+  src/app/crash_trap.cpp
   src/zoom/room_plan.cpp
   src/zoom/reach.cpp
   src/zoom/signal_protocol.cpp
@@ -229,7 +232,8 @@ target_link_libraries(zcomms_audio_tests PRIVATE zcomms_audio)
 # src/zoom on the include path for the SDK-FREE zoom headers only
 # (room_plan.h, reach.h); anything including SDK headers stays out of this
 # target -- it links no sdk.lib.
-target_include_directories(zcomms_audio_tests PRIVATE tests/audio src/zoom)
+target_include_directories(zcomms_audio_tests PRIVATE tests/audio src/zoom
+                           src/app)
 if(MSVC)
   target_compile_options(zcomms_audio_tests PRIVATE /W4 /permissive- /utf-8)
 endif()

@@ -67,3 +67,4 @@ void TestReach();
 void TestSignalProtocol();
 void TestSignalOutbox();
 void TestDuckPlan();
+void TestCrashTrap();

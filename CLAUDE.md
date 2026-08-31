@@ -174,6 +174,23 @@ the exe); if the download or the runtime is absent the app falls back to the
 old Edge/Chrome `--app` window. This is also the Mac-port shape: same panel
 HTML, WKWebView shell.
 
+### The crash trap (2026-08-31, from a real field crash)
+
+v0.1.6 died at join on a work-managed machine as WER's anonymous
+"ucrtbase.dll 0xc0000409" -- the CRT fail-fast, which is what an uncaught
+C++ exception, abort(), or a CRT invalid parameter all become in a
+Windows-subsystem exe. That machine's policy allowed photographing the
+screen but not copying files off, so `src/app/crash_trap.{h,cpp}` makes
+the screen the diagnosis surface: every fatal route (std::terminate,
+SIGABRT, CRT invalid parameter, purecall, unhandled SEH, plus a try/catch
+around Run() so a main-thread throw keeps its type and what()) logs
+`FATAL: <detail>` and holds a system-modal "ZComms crashed" box showing
+the same text. `zcomms --selftest-crash throw|abort|av` (hidden flag)
+proves the trap on any machine. Gotcha: `src/audio/signal.h` shadows the
+CRT's `<signal.h>` on the app's include path, so `<csignal>` does not
+compile there -- crash_trap.cpp declares `signal()` itself. The field
+crash's ROOT CAUSE is still open; the trap exists to name it next time.
+
 ### The talkback delivery laws (2026-08-29, a full day of live hunting)
 
 The day's no-audio mystery decomposed into three independent laws, each
