@@ -152,6 +152,17 @@ GUI exes are not waited on), else a dated log file under
 (`g_console_keys`); the old hide-the-console hack is gone -- any console
 present now belongs to the operator's own terminal.
 
+App identity/chrome (same day): the icon is `src/app/zcomms.ico`, rendered
+by `tools/make-icon.py` (Pillow; dark tile, amber transmit mark) --
+re-run the script, never hand-edit the .ico. It is resource `1` in
+version.rc (Explorer/taskbar), the shell window class icon, and the
+installer's MUI icon. The shell window's native title bar is dark
+(`DwmSetWindowAttribute` 20, set before ShowWindow; harmless no-op pre-
+20H1). The panel's ops strip shows ONLY the latest event, click toggles
+the scroll-back -- the full history rendering as a log wall was
+owner-flagged; the information stays because it is the mid-show
+"why isn't my key reaching anyone" surface.
+
 ### The panel is a native window (2026-08-29)
 
 `src/app/shell_window.cpp` hosts the panel in **WebView2** on a dedicated STA

@@ -158,7 +158,7 @@ if(ZCOMMS_HAVE_SDK)
     target_link_options(zcomms PRIVATE "/ENTRY:mainCRTStartup")
   endif()
   target_link_libraries(zcomms PRIVATE zcomms_zoom winmm ws2_32 shell32
-                        winhttp crypt32 bcrypt)
+                        winhttp crypt32 bcrypt dwmapi)
   if(ZCOMMS_HAVE_WEBVIEW2)
     target_sources(zcomms PRIVATE src/app/shell_window.cpp)
     target_include_directories(zcomms PRIVATE

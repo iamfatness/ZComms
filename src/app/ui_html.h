@@ -147,10 +147,14 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
   width:22px;height:20px;font:500 10px var(--mono);color:var(--dim);
   background:var(--panel-key)}
 .chip.on{color:#12141A;background:var(--green);border-color:var(--green)}
-/* status bar */
-.ops{border-top:1px solid var(--scribe);padding:10px 22px;background:var(--rack);
-  font:13px var(--mono);color:var(--legend);min-height:38px;flex-shrink:0;
-  display:flex;gap:26px;overflow:hidden;white-space:nowrap;text-transform:lowercase}
+/* ops strip: one quiet line (the latest event); click for the scroll-back.
+   The information is load-bearing mid-show (why isn't my key reaching
+   anyone) but the history reading as a log wall was owner-flagged. */
+.ops{border-top:1px solid var(--scribe);padding:8px 22px;background:var(--rack);
+  font:12px var(--mono);color:var(--legend);min-height:32px;flex-shrink:0;
+  overflow:hidden;cursor:pointer;text-transform:lowercase}
+.ops span{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.ops.open{max-height:180px;overflow-y:auto}
 </style></head><body>
 <main class="rack" role="application" aria-label="ZComms talkback station">
   <div class="rail">
@@ -214,7 +218,7 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
     <button class="tog" id="leavebtn" title="leave the meeting, keep the app">LEAVE</button>
     <div class="hmeter" id="hmeter" title="mic level"></div>
   </div>
-  <div class="ops" id="ops"><span>panel ready — waiting for the station…</span></div>
+  <div class="ops" id="ops" title="ops log — click to expand"><span>panel ready — waiting for the station…</span></div>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -349,6 +353,7 @@ $('editbtn').onclick=()=>{editMode=!editMode;$('editbtn').classList.toggle('on',
 $('setbtn').onclick=()=>{$('drawer').classList.toggle('show');
   $('setbtn').classList.toggle('on',$('drawer').classList.contains('show'));};
 $('side').onclick=()=>act('sidetone',(S.sidetone?'off':'on'));
+$('ops').onclick=()=>{$('ops').classList.toggle('open');render();};
 $('aec').onclick=()=>act('aec',(S.aec?'off':'on'));
 $('tone').onclick=()=>act('tone',(S.tone?'off':'on'));
 $('g-dn').onclick=()=>act('gain',(S.gain-1));
@@ -393,7 +398,9 @@ function render(){
   $('deskhint').style.display=idle?'none':'';
   $('strip').style.display=idle?'none':'flex';
   const ops=$('ops');ops.innerHTML='';
-  (S.log||[]).forEach(l=>{const sp=document.createElement('span');sp.textContent=l;ops.appendChild(sp);});
+  const lines=S.log||[];
+  const shown=ops.classList.contains('open')?lines.slice().reverse():lines.slice(-1);
+  shown.forEach(l=>{const sp=document.createElement('span');sp.textContent=l;ops.appendChild(sp);});
   if(idle){
     const pass=needPass();
     const signin=S.phase==='signin';

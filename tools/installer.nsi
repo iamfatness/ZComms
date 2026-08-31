@@ -42,8 +42,8 @@ OutFile "${OUT_FILE}"
 InstallDir "$LOCALAPPDATA\ZComms\app"
 BrandingText "ZComms ${VERSION}"
 
-!define MUI_ICON "${NSISDIR}\Contrib\Graphics\Icons\modern-install.ico"
-!define MUI_UNICON "${NSISDIR}\Contrib\Graphics\Icons\modern-uninstall.ico"
+!define MUI_ICON "..\src\app\zcomms.ico"
+!define MUI_UNICON "..\src\app\zcomms.ico"
 !define MUI_ABORTWARNING
 
 !insertmacro MUI_PAGE_WELCOME

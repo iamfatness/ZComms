@@ -3,6 +3,10 @@
 // kAppVersion in app_identity.h.
 #include <winver.h>
 
+// Lowest-numbered icon = the one Explorer and the taskbar use. Rendered by
+// tools/make-icon.py; re-run it rather than editing the .ico.
+1 ICON "zcomms.ico"
+
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 0,1,4,0
  PRODUCTVERSION 0,1,4,0
