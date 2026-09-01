@@ -52,6 +52,34 @@ class CaptureDevice {
   std::string device_name_;
 };
 
+// Multichannel line input for extern feeds: opens the device at its NATIVE
+// channel count and hands over interleaved 48 kHz float frames. The channel
+// pick and downmix happen above this layer (extern_feed.h), where they are
+// pure -- this class exists because CaptureDevice's channels=1 open lets
+// miniaudio downmix the WHOLE device, which destroys per-channel routing.
+class MultiCaptureDevice {
+ public:
+  using Callback =
+      std::function<void(const float* interleaved, int frames, int channels)>;
+
+  MultiCaptureDevice();
+  ~MultiCaptureDevice();
+
+  bool Start(const std::string& match, Callback cb, std::string* error);
+  void Stop();
+  bool running() const;
+
+  const std::string& device_name() const { return device_name_; }
+  int channels() const;
+  uint64_t frames() const;
+
+  struct Impl;
+
+ private:
+  std::unique_ptr<Impl> impl_;
+  std::string device_name_;
+};
+
 // Headphone / monitor output. Pull-based: the callback is asked to fill the
 // buffer, which is the shape a mixer wants.
 class MonitorDevice {

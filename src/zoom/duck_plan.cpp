@@ -2,7 +2,7 @@
 
 namespace zc {
 
-bool DuckPlanner::Next(uint32_t ready_mask, uint32_t key_mask, int64_t now_ms,
+bool DuckPlanner::Next(uint32_t ready_mask, uint32_t active_mask, int64_t now_ms,
                        VolumeAction* out) {
   if (now_ms < next_call_ms_) return false;
   for (int s = 0; s < kSlots; ++s) {
@@ -10,7 +10,7 @@ bool DuckPlanner::Next(uint32_t ready_mask, uint32_t key_mask, int64_t now_ms,
       known_[s] = false;  // gone; a re-created channel needs unity again
       continue;
     }
-    const float want = ((key_mask >> s) & 1u) != 0 ? kDuck : kUnity;
+    const float want = ((active_mask >> s) & 1u) != 0 ? kDuck : kUnity;
     if (known_[s] && applied_[s] == want) continue;
     out->slot = s;
     out->volume = want;

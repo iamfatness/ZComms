@@ -82,6 +82,11 @@ class TalkbackChannels : public ZOOM_SDK_NAMESPACE::IMeetingTalkbackCtrlEvent {
   // Returns the number of channels it was sent to.
   int SendToKeyed(const int16_t* pcm, int samples);
 
+  // One frame to ONE ready slot -- the extern-feed path composes a distinct
+  // mix per channel (voice + latched feed), so the fan-out moved above the
+  // SDK boundary. False when the slot is not ready or Zoom refused.
+  bool SendToSlot(int slot, const int16_t* pcm, int samples);
+
   // Snapshot for UI/state. Pump thread.
   std::vector<ChannelState> Snapshot() const;
   uint64_t send_failures() const { return send_failures_.load(); }

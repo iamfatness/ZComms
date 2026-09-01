@@ -368,6 +368,38 @@ room-scoped and backoff like invites; the station's own BO-instance ghost
 bo layout/apply/start against our own rooms, cross-room audio realign
 delivery, the chat-notify visual on a stock client.
 
+### Extern feeds: latched sources into channels (2026-09-01, v0.1.9)
+
+The ZoomISO capability, built (spec docs/plans/2026-09-01-extern-feeds.md):
+route one channel (or pair, downmixed -- law #5) of a multichannel capture
+device into one talkback channel, LATCHED, so a larger intercom uses Zoom
+as its last mile. Shape: `MultiCaptureDevice` (devices.cpp, native channel
+count -- the channels=1 open would downmix the whole device) ->
+`FeedChain` (extern_feed: extract/downmix, gain, limiter, latch = Envelope,
+own ring; no AEC, no PTT) -> `ChannelBankSink` composes PER-SLOT frames on
+the one pacer clock via `ChannelMix` (pure) and sends distinct mixes with
+`TalkbackChannels::SendToSlot`. **Both ducks are SIGNAL-GATED
+(`SignalGate`, -50 dBFS, 800 ms hang), never state-gated** -- the ZoomISO
+refinement: a latched-but-silent feed leaves members' meeting audio at
+unity (DuckPlanner now takes an activity mask), and the barge duck (feed
+to 30% under the operator, decision B) engages only while the voice
+actually carries audio. Feeds are app-lifetime (`FeedBank` in main.cpp),
+persisted in `%APPDATA%\ZComms\feeds.env`, restored at launch; panel
+settings drawer has the picker/LATCH/gain rows and cells show a FEED tag.
+Verbs: `feed set <slot> <device:ch[-ch2]>` / `feed latch <slot> on|off` /
+`feed gain <slot> <db>` / `feed off <slot>` (slots 0-based like every
+other verb). Unlatch drains the ramp-out tail before the slot stops being
+serviced (cutting it would put back the click the envelope removes).
+
+Verified: 100/100 unit tests (gate, mix truth table + ramp + clamp,
+extract/downmix, spec/env round-trip, chain latch semantics); live on this
+box: verbs -> GoXLR multichannel device opened, latch/gain applied,
+feeds.env written, restored on relaunch. **NOT yet live-verified in a
+meeting (M0 gates)**: distinct simultaneous per-slot streams from one
+client (ZoomISO proves the SDK side), the hours-long latched send into an
+empty channel (the 2026-08-28 AppHangB1 pattern -- soak it), feed audible
+to members, latched-silent leaving meeting at unity, barge duck audible.
+
 ### Shared intercom roadmap with CoreVideo (owner, 2026-08-30)
 
 Zoom is the LAST MILE of a real intercom. CoreVideo is building the OBS
@@ -376,12 +408,9 @@ diverging. The target shapes:
 
 - **Party-line (PL) channels with multiple members** -- named group lines,
   not just per-person privates.
-- **Extern feeds latched into a channel** -- another comms system's mix
-  carried into a talkback channel. (Extern sources may be stereo: mono
-  law #5 says downmix at the boundary.)
-- **Director PTT barges over a latched feed**: while keyed, the latched
-  feed ducks ~30% under the director's voice (**decision B**). This is
-  in-channel mixing on our side, distinct from law #4's meeting-audio duck.
+- **Extern feeds latched into a channel** -- BUILT 2026-09-01 (v0.1.9, see
+  its section above), including decision B's director barge, refined to
+  signal-gated ducking.
 - **Per-person private channels become OPT-IN, not automatic (decision A)**
   -- frees channel budget (16 hard cap) for PLs. Today's auto-assign-
   everyone-a-channel default will need a policy flag when PLs land; the

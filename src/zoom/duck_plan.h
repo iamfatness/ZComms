@@ -6,7 +6,11 @@
 // and talent notices on assignment. SetChannelBackgroundVolume is a
 // channel-scoped 0.0-2.0 gain (1.0 = unity), so one call covers late
 // joiners. Policy enforced here: unity the moment a channel exists, duck
-// only while that channel is actually keyed (transmitting).
+// only while that channel is ACTIVE. Since extern feeds (2026-09-01) the
+// caller's mask is signal-gated activity -- audio actually flowing (voice
+// gate on keyed slots, feed gate on latched ones) -- never raw key/latch
+// state: a latched-but-silent feed must leave the meeting at unity, the
+// ZoomISO behavior.
 //
 // Shaped as a planner because every mutation is a rate-limited SDK call
 // (code 18 -- the limiter is per CALL): the caller asks for at most one
@@ -31,8 +35,9 @@ class DuckPlanner {
   static constexpr int64_t kRetryMs = 2000;  // after a refusal (code 18)
 
   // The one SetChannelBackgroundVolume call to make now, or false if
-  // converged / paced out. Masks are slot bitmasks (bit i = slot i).
-  bool Next(uint32_t ready_mask, uint32_t key_mask, int64_t now_ms,
+  // converged / paced out. Masks are slot bitmasks (bit i = slot i);
+  // `active_mask` = slots actually carrying audio (see header comment).
+  bool Next(uint32_t ready_mask, uint32_t active_mask, int64_t now_ms,
             VolumeAction* out);
   void Confirm(const VolumeAction& a);  // Zoom accepted the call
   void Fail(int64_t now_ms);            // refused: back off, state unknown

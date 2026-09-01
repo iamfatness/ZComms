@@ -56,6 +56,9 @@ add_library(zcomms_audio STATIC
   src/audio/limiter.cpp
   src/audio/frame_accumulator.cpp
   src/audio/aec.cpp
+  src/audio/signal_gate.cpp
+  src/audio/channel_mix.cpp
+  src/audio/extern_feed.cpp
   src/audio/devices.cpp
   src/audio/loopback.cpp
   src/audio/wav_sink.cpp
@@ -215,6 +218,9 @@ add_executable(zcomms_audio_tests
   tests/audio/test_sample_ring.cpp
   tests/audio/test_frame_ring.cpp
   tests/audio/test_aec.cpp
+  tests/audio/test_signal_gate.cpp
+  tests/audio/test_channel_mix.cpp
+  tests/audio/test_extern_feed.cpp
   tests/zoom/test_room_plan.cpp
   tests/zoom/test_reach.cpp
   tests/zoom/test_signal_protocol.cpp

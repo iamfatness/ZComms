@@ -36,7 +36,10 @@
 
 #include "app_identity.h"
 #include "audio_defs.h"
+#include "channel_mix.h"
 #include "crash_trap.h"
+#include "extern_feed.h"
+#include "signal_gate.h"
 #include "clock.h"
 #include "control_server.h"
 #include "zoom_oauth.h"
@@ -169,14 +172,282 @@ struct AppConfig {
   int channels = 16;
 };
 
-// The seam between the paced TX thread and the channel bank. "Nothing keyed"
-// is a normal quiet state, not a send failure.
+// Latched extern feeds: one per talkback slot, a channel (or pair) of a
+// multichannel device carried into that channel continuously -- the larger
+// system's mix, with Zoom as the last mile (spec docs/plans/
+// 2026-09-01-extern-feeds.md). App-lifetime, not session-scoped: feeds are
+// rig plumbing and survive the session cycle; feeds.env survives the app.
+class FeedBank {
+ public:
+  static constexpr int kSlots = TalkbackChannels::kMaxChannels;
+
+  struct Status {
+    int slot = -1;
+    std::string spec;
+    double gain_db = 0.0;
+    bool latch = false;
+    bool dev_ok = false;
+    int peak = 0;
+  };
+
+  // Control/main thread. Returns the ops line describing what happened.
+  std::string Apply(const std::string& arg) {
+    const auto sp1 = arg.find(' ');
+    const std::string op = sp1 == std::string::npos ? arg : arg.substr(0, sp1);
+    const std::string rest = sp1 == std::string::npos ? "" : arg.substr(sp1 + 1);
+    const auto sp2 = rest.find(' ');
+    const int slot = std::atoi(
+        (sp2 == std::string::npos ? rest : rest.substr(0, sp2)).c_str());
+    const std::string val = sp2 == std::string::npos ? "" : rest.substr(sp2 + 1);
+    if (slot < 0 || slot >= kSlots) return "feed: bad channel";
+    const std::string ch = "CH " + std::to_string(slot + 1);
+
+    if (op == "set") {
+      FeedConfig c;
+      if (!ParseFeedSpec(val, &c)) {
+        return "feed: could not read \"" + val + "\" (device:ch or device:ch-ch)";
+      }
+      std::string err;
+      if (!Set(slot, c, &err)) return "feed " + ch + ": " + err;
+      SaveEnv();
+      return "feed " + ch + " <- " + FormatFeedSpec(slots_[slot].cfg) + " (" +
+             device_name(slot) + ")";
+    }
+    if (op == "latch") {
+      if (!SetLatch(slot, val == "on")) return "feed " + ch + ": no feed set";
+      SaveEnv();
+      return "feed " + ch + (val == "on" ? " LATCHED" : " unlatched");
+    }
+    if (op == "gain") {
+      if (!SetGain(slot, std::atof(val.c_str()))) {
+        return "feed " + ch + ": no feed set";
+      }
+      SaveEnv();
+      return "feed " + ch + " gain " + val + " dB";
+    }
+    if (op == "off") {
+      Off(slot);
+      SaveEnv();
+      return "feed " + ch + " removed";
+    }
+    return "feed: unknown op \"" + op + "\" (set|latch|gain|off)";
+  }
+
+  bool Set(int slot, const FeedConfig& cfg, std::string* err) {
+    std::lock_guard<std::mutex> lock(m_);
+    Slot& s = slots_[slot];
+    if (s.dev) s.dev->Stop();
+    s.dev.reset();
+    FeedConfig c = cfg;
+    // Re-setting a feed keeps its latch/gain unless the new spec says
+    // otherwise -- the common case is repointing a device, not a reset.
+    if (s.chain) {
+      c.latch = s.cfg.latch;
+      c.gain_db = s.cfg.gain_db;
+    }
+    s.cfg = c;
+    s.chain = std::make_unique<FeedChain>(c);
+    s.gate = std::make_unique<SignalGate>(-50.0, 800, kSampleRate);
+    s.dev = std::make_unique<MultiCaptureDevice>();
+    FeedChain* chain = s.chain.get();
+    s.dev_ok = s.dev->Start(
+        c.device,
+        [chain](const float* in, int frames, int nch) {
+          chain->PushInterleaved(in, frames, nch);
+        },
+        err);
+    if (!s.dev_ok) {
+      s.dev.reset();
+      return false;
+    }
+    RefreshMasks();
+    return true;
+  }
+
+  void Off(int slot) {
+    std::lock_guard<std::mutex> lock(m_);
+    Slot& s = slots_[slot];
+    if (s.dev) s.dev->Stop();
+    s.dev.reset();
+    s.chain.reset();
+    s.gate.reset();
+    s.cfg = FeedConfig{};
+    s.dev_ok = false;
+    RefreshMasks();
+  }
+
+  bool SetLatch(int slot, bool on) {
+    std::lock_guard<std::mutex> lock(m_);
+    Slot& s = slots_[slot];
+    if (!s.chain) return false;
+    s.cfg.latch = on;
+    s.chain->SetLatch(on);
+    if (!on) draining_mask_.fetch_or(1u << slot);
+    RefreshMasks();
+    return true;
+  }
+
+  bool SetGain(int slot, double db) {
+    std::lock_guard<std::mutex> lock(m_);
+    Slot& s = slots_[slot];
+    if (!s.chain) return false;
+    s.cfg.gain_db = db;
+    s.chain->SetGainDb(db);
+    return true;
+  }
+
+  std::vector<Status> Snapshot() {
+    std::lock_guard<std::mutex> lock(m_);
+    std::vector<Status> out;
+    for (int i = 0; i < kSlots; ++i) {
+      const Slot& s = slots_[i];
+      if (!s.chain) continue;
+      Status st;
+      st.slot = i;
+      st.spec = FormatFeedSpec(s.cfg);
+      st.gain_db = s.cfg.gain_db;
+      st.latch = s.cfg.latch;
+      st.dev_ok = s.dev_ok && s.dev && s.dev->running();
+      st.peak = s.chain->peak();
+      out.push_back(st);
+    }
+    return out;
+  }
+
+  // TX pacer thread. Slots the sink must service this tick: latched feeds
+  // plus chains still draining their unlatch ramp-out tail (cutting the
+  // tail would put the click back that the envelope exists to remove).
+  uint32_t send_targets() const {
+    return latched_mask_.load() | draining_mask_.load();
+  }
+
+  // Pull slot's frame. True = `out` is valid (audio, or silence covering a
+  // latched underrun -- the pacer law: starvation is counted, never a
+  // stall). False = this slot has no feed content this tick.
+  bool PullFrame(int slot, int16_t* out) {
+    std::lock_guard<std::mutex> lock(m_);
+    Slot& s = slots_[slot];
+    if (!s.chain) {
+      draining_mask_.fetch_and(~(1u << slot));
+      return false;
+    }
+    if (s.chain->PullFrame(out)) {
+      if (s.gate && s.gate->Update(out, kFrameSamples)) {
+        active_mask_.fetch_or(1u << slot);
+      } else {
+        active_mask_.fetch_and(~(1u << slot));
+      }
+      return true;
+    }
+    if (s.gate) s.gate->Update(nullptr, kFrameSamples);
+    active_mask_.fetch_and(~(1u << slot));
+    if (!s.cfg.latch) {
+      // Drained: the ramp-out tail is gone, stop servicing the slot.
+      draining_mask_.fetch_and(~(1u << slot));
+      return false;
+    }
+    if (s.dev_ok && s.dev && s.dev->running()) {
+      std::memset(out, 0, static_cast<size_t>(kFrameSamples) * sizeof(int16_t));
+      underruns_.fetch_add(1);
+      return true;
+    }
+    return false;  // device dead: no feed rather than eternal silence
+  }
+
+  // Slots whose feed is ACTUALLY carrying audio (SignalGate) -- the duck
+  // planner's input, never latch state (the ZoomISO refinement).
+  uint32_t active_mask() const { return active_mask_.load(); }
+  uint64_t underruns() const { return underruns_.load(); }
+
+  void LoadEnv(const std::function<void(const std::string&)>& log) {
+    std::ifstream f(EnvPath());
+    if (!f) return;
+    std::string line;
+    while (std::getline(f, line)) {
+      const auto eq = line.find('=');
+      if (eq == std::string::npos || line.rfind("feed", 0) != 0) continue;
+      const int slot = std::atoi(line.substr(4, eq - 4).c_str());
+      FeedConfig c;
+      if (slot < 0 || slot >= kSlots || !ParseFeedLine(line.substr(eq + 1), &c))
+        continue;
+      std::string err;
+      if (Set(slot, c, &err)) {
+        // Set() preserves prior latch/gain only when re-setting; first set
+        // takes them from the parsed config -- restore explicitly.
+        SetLatch(slot, c.latch);
+        SetGain(slot, c.gain_db);
+        log("feed CH " + std::to_string(slot + 1) + " restored: " +
+            FormatFeedSpec(c) + (c.latch ? " (latched)" : ""));
+      } else {
+        log("feed CH " + std::to_string(slot + 1) + " NOT restored: " + err);
+      }
+    }
+  }
+
+  void SaveEnv() {
+    // m_ deliberately not held: callers hold no lock and the writes race at
+    // worst with another verb, which last-writer-wins resolves.
+    std::ofstream f(EnvPath(), std::ios::trunc);
+    if (!f) return;
+    f << "# ZComms extern feeds -- written by the app on every feed change\n";
+    for (int i = 0; i < kSlots; ++i) {
+      std::lock_guard<std::mutex> lock(m_);
+      if (!slots_[i].chain) continue;
+      f << "feed" << i << "=" << FormatFeedLine(slots_[i].cfg) << "\n";
+    }
+  }
+
+ private:
+  struct Slot {
+    FeedConfig cfg;
+    std::unique_ptr<FeedChain> chain;
+    std::unique_ptr<MultiCaptureDevice> dev;
+    std::unique_ptr<SignalGate> gate;
+    bool dev_ok = false;
+  };
+
+  std::string device_name(int slot) const {
+    return slots_[slot].dev ? slots_[slot].dev->device_name() : "?";
+  }
+
+  void RefreshMasks() {
+    uint32_t latched = 0;
+    for (int i = 0; i < kSlots; ++i) {
+      if (slots_[i].chain && slots_[i].cfg.latch) latched |= 1u << i;
+    }
+    latched_mask_.store(latched);
+  }
+
+  static std::string EnvPath() {
+    char appdata[MAX_PATH] = {};
+    if (GetEnvironmentVariableA("APPDATA", appdata, sizeof(appdata)) == 0) {
+      return "feeds.env";
+    }
+    const std::string dir = std::string(appdata) + "\\ZComms";
+    CreateDirectoryA(dir.c_str(), nullptr);
+    return dir + "\\feeds.env";
+  }
+
+  mutable std::mutex m_;
+  Slot slots_[kSlots];
+  std::atomic<uint32_t> latched_mask_{0};
+  std::atomic<uint32_t> draining_mask_{0};
+  std::atomic<uint32_t> active_mask_{0};
+  std::atomic<uint64_t> underruns_{0};
+};
+
+// The seam between the paced TX thread and the channel bank. Composes each
+// slot's outgoing frame -- operator voice when keyed, plus that slot's
+// latched extern feed, barge-ducked while the voice ACTUALLY carries audio
+// (ChannelMix) -- and sends one distinct mix per slot. "Nothing keyed and
+// nothing latched" is a normal quiet state, not a send failure.
 class ChannelBankSink : public FrameSink {
  public:
-  explicit ChannelBankSink(TalkbackChannels* bank) : bank_(bank) {}
+  ChannelBankSink(TalkbackChannels* bank, FeedBank* feeds)
+      : bank_(bank), feeds_(feeds), mix_(50.0, kSampleRate),
+        voice_gate_(-50.0, 800, kSampleRate) {}
   bool CanSend() override { return bank_->channels_ready() > 0; }
   bool Send(const int16_t* pcm, int samples) override {
-    if (bank_->key_mask() == 0) return true;
     // The peak of what actually leaves for Zoom, post-envelope: the number
     // that separates "transmitting your voice" from "keyed but shipping
     // silence" (an envelope/mute defect) at a glance.
@@ -186,14 +457,50 @@ class ChannelBankSink : public FrameSink {
       if (a > peak) peak = a;
     }
     tx_peak_.store(peak);
-    return bank_->SendToKeyed(pcm, samples) > 0;
+    voice_active_.store(voice_gate_.Update(pcm, samples));
+
+    const uint32_t keys = bank_->key_mask();
+    const uint32_t ftargets = feeds_ != nullptr ? feeds_->send_targets() : 0;
+    const uint32_t ready = bank_->ready_mask();
+    const uint32_t targets = (keys | ftargets) & ready;
+    if (targets == 0) return true;
+
+    const bool va = voice_active_.load();
+    int sent = 0;
+    bool failed = false;
+    int16_t fbuf[kFrameSamples];
+    int16_t obuf[kFrameSamples];
+    for (int s = 0; s < TalkbackChannels::kMaxChannels; ++s) {
+      if (((targets >> s) & 1u) == 0) continue;
+      const bool keyed = ((keys >> s) & 1u) != 0;
+      const int16_t* fptr = nullptr;
+      if (((ftargets >> s) & 1u) != 0 && feeds_->PullFrame(s, fbuf)) {
+        fptr = fbuf;
+      }
+      if (!mix_.Compose(s, keyed ? pcm : nullptr, fptr, va, samples, obuf)) {
+        continue;
+      }
+      if (bank_->SendToSlot(s, obuf, samples)) {
+        ++sent;
+      } else {
+        failed = true;
+      }
+    }
+    return sent > 0 || !failed;
   }
   // 0..32767; only meaningful while something is keyed.
   int tx_peak() const { return tx_peak_.load(); }
+  // The voice SignalGate: true while the operator's chain actually carries
+  // audio. Feeds the duck planner alongside FeedBank::active_mask().
+  bool voice_active() const { return voice_active_.load(); }
 
  private:
   TalkbackChannels* bank_;
+  FeedBank* feeds_;
+  ChannelMix mix_;
+  SignalGate voice_gate_;
   std::atomic<int> tx_peak_{0};
+  std::atomic<bool> voice_active_{false};
 };
 
 std::string JsonEscape(const std::string& s) {
@@ -480,6 +787,7 @@ int Run(int argc, char** argv) {
   std::vector<std::string> bo_cmds;
   std::vector<std::pair<int, bool>> cue_edges;  // chat cue signals to a slot
   std::vector<int> notify_edges;                // assignment notices to a slot
+  std::vector<std::string> feed_cmds;           // extern-feed verbs, main-thread applied
   std::mutex join_m;
   std::string join_pending;
   std::string passcode_pending;
@@ -555,6 +863,12 @@ int Run(int argc, char** argv) {
             //   bo start                              bo stop
             std::lock_guard<std::mutex> lock(edge_m);
             bo_cmds.push_back(arg);
+          } else if (verb == "feed") {
+            // feed set <slot> <device:ch[-ch2]> | latch <slot> on|off |
+            // gain <slot> <db> | off <slot>. Applied on the main thread:
+            // Set opens a capture device.
+            std::lock_guard<std::mutex> lock(edge_m);
+            feed_cmds.push_back(arg);
           } else if (verb == "setmic") {
             // Device names carry spaces; the whole argument is the name.
             std::lock_guard<std::mutex> lock(dev_m);
@@ -628,6 +942,19 @@ int Run(int argc, char** argv) {
     if (ops_log.size() > 5) ops_log.erase(ops_log.begin());
   };
 
+  // Extern feeds: app-lifetime rig plumbing, restored from feeds.env now so
+  // a latched feed is already flowing when the first meeting comes up.
+  FeedBank feeds;
+  feeds.LoadEnv(log_op);
+  const auto process_feeds = [&]() {
+    std::vector<std::string> cmds;
+    {
+      std::lock_guard<std::mutex> lock(edge_m);
+      cmds.swap(feed_cmds);
+    }
+    for (const std::string& c : cmds) log_op(feeds.Apply(c));
+  };
+
   // Minimal state while there is no meeting yet: enough for the panel to
   // show the join card and any parse error.
   const auto publish_phase = [&](const std::string& phase,
@@ -675,6 +1002,7 @@ int Run(int argc, char** argv) {
       }
       publish_phase("idle", "PASTE A MEETING LINK");
       if (quit_req.load()) return 0;
+      process_feeds();  // feeds are configurable before any meeting exists
       Sleep(100);
       std::lock_guard<std::mutex> lock(join_m);
       if (!join_pending.empty()) {
@@ -955,7 +1283,7 @@ int Run(int argc, char** argv) {
   // Test mode: an internally generated beep pattern through the same ring and
   // pacer, so the paced TX path is exercised identically -- only the source
   // differs.
-  ChannelBankSink sink(&bank);
+  ChannelBankSink sink(&bank, &feeds);
   std::unique_ptr<AudioEngine> engine;
   std::unique_ptr<FrameRing> test_ring;
   std::unique_ptr<TxPacer> test_pacer;
@@ -1528,6 +1856,21 @@ int Run(int argc, char** argv) {
       j += "\"out\":\"" +
            JsonEscape(engine ? engine->monitor_device_name() : "") + "\",";
       j += dev_json + ",";
+      j += "\"feeds\":[";
+      {
+        bool ff = true;
+        for (const FeedBank::Status& fs : feeds.Snapshot()) {
+          if (!ff) j += ",";
+          ff = false;
+          j += "{\"slot\":" + std::to_string(fs.slot) + ",";
+          j += "\"spec\":\"" + JsonEscape(fs.spec) + "\",";
+          j += "\"gain\":" + std::to_string(static_cast<int>(fs.gain_db)) + ",";
+          j += std::string("\"latch\":") + (fs.latch ? "true," : "false,");
+          j += std::string("\"ok\":") + (fs.dev_ok ? "true," : "false,");
+          j += "\"peak\":" + std::to_string(fs.peak) + "}";
+        }
+      }
+      j += "],";
       j += "\"channels\":[";
       bool first = true;
       for (int s = 0; s < static_cast<int>(snap.size()); ++s) {
@@ -1607,6 +1950,7 @@ int Run(int argc, char** argv) {
     }
 
     // Apply remaining control-surface edges.
+    process_feeds();
     if (quit_req.load()) quit = true;
     if (leave_req.exchange(false)) {
       // Leave the meeting, keep the app: break to teardown; the session
@@ -1733,11 +2077,17 @@ int Run(int argc, char** argv) {
     talking = keys != 0;
 
     // Meeting-audio duck under the talkback voice: unity when idle, kDuck
-    // while keyed, healed one paced SDK call at a time (the per-call rate
-    // limit applies to volume calls like everything else).
+    // only while a channel ACTUALLY carries audio -- the voice gate on
+    // keyed slots, the feed gate on latched ones. Latch/key state alone
+    // never ducks (the ZoomISO refinement, owner 2026-09-01): a latched but
+    // silent extern feed leaves members' meeting audio at unity. Healed one
+    // paced SDK call at a time (the per-call rate limit applies to volume
+    // calls like everything else).
     {
+      const uint32_t activity =
+          (sink.voice_active() ? keys : 0u) | feeds.active_mask();
       VolumeAction va;
-      if (duck.Next(bank.ready_mask(), keys, NowNs() / 1'000'000, &va)) {
+      if (duck.Next(bank.ready_mask(), activity, NowNs() / 1'000'000, &va)) {
         if (bank.SetChannelVolume(va.slot, va.volume)) {
           duck.Confirm(va);
         } else {

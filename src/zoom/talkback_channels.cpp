@@ -209,6 +209,25 @@ bool TalkbackChannels::SetChannelVolume(int slot, float volume) {
          ZOOM_SDK_NAMESPACE::SDKERR_SUCCESS;
 }
 
+bool TalkbackChannels::SendToSlot(int slot, const int16_t* pcm, int samples) {
+  if (slot < 0 || slot >= kMaxChannels || controller_ == nullptr) return false;
+  if (((ready_mask_.load() >> slot) & 1u) == 0) return false;
+  std::lock_guard<std::mutex> lock(send_m_);
+  // Mono only -- law #5, same as SendToKeyed below.
+  const SDKError err = controller_->SendAudioDataToChannel(
+      send_ids_[static_cast<size_t>(slot)].c_str(),
+      reinterpret_cast<const char*>(pcm),
+      static_cast<unsigned int>(samples * static_cast<int>(sizeof(int16_t))),
+      kSampleRate, ZoomSDKAudioChannel_Mono);
+  if (err != SDKERR_SUCCESS) {
+    send_failures_.fetch_add(1);
+    return false;
+  }
+  channel_sends_.fetch_add(1);
+  sent_mask_.fetch_or(1u << slot);
+  return true;
+}
+
 int TalkbackChannels::SendToKeyed(const int16_t* pcm, int samples) {
   const uint32_t live = key_mask_.load() & ready_mask_.load();
   if (live == 0 || controller_ == nullptr) return 0;

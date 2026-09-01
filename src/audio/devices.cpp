@@ -162,6 +162,85 @@ uint64_t CaptureDevice::frames() const {
   return impl_ ? impl_->frames.load(std::memory_order_relaxed) : 0;
 }
 
+// --- MultiCaptureDevice -----------------------------------------------------
+
+struct MultiCaptureDevice::Impl {
+  ma_device device{};
+  bool started = false;
+  Callback cb;
+  int channels = 0;
+  std::atomic<uint64_t> frames{0};
+};
+
+MultiCaptureDevice::MultiCaptureDevice() : impl_(std::make_unique<Impl>()) {}
+MultiCaptureDevice::~MultiCaptureDevice() { Stop(); }
+
+namespace {
+void MultiCaptureCallback(ma_device* device, void* /*output*/,
+                          const void* input, ma_uint32 frame_count) {
+  auto* impl = static_cast<MultiCaptureDevice::Impl*>(device->pUserData);
+  if (impl == nullptr || input == nullptr || frame_count == 0) return;
+  impl->frames.fetch_add(frame_count, std::memory_order_relaxed);
+  if (impl->cb) {
+    impl->cb(static_cast<const float*>(input), static_cast<int>(frame_count),
+             impl->channels);
+  }
+}
+}  // namespace
+
+bool MultiCaptureDevice::Start(const std::string& match, Callback cb,
+                               std::string* error) {
+  ma_device_id id{};
+  std::string name;
+  if (!FindDevice(true, match, &id, &name)) {
+    if (error) {
+      *error = match.empty() ? "no capture device found"
+                             : "no capture device matching \"" + match + "\"";
+    }
+    return false;
+  }
+  device_name_ = name;
+  impl_->cb = std::move(cb);
+
+  ma_device_config cfg = ma_device_config_init(ma_device_type_capture);
+  cfg.capture.pDeviceID = &id;
+  cfg.capture.format = ma_format_f32;
+  // channels = 0 asks for the device's NATIVE count -- the whole reason
+  // this class exists. The actual count is read back after init.
+  cfg.capture.channels = 0;
+  cfg.capture.shareMode = ma_share_mode_shared;
+  cfg.sampleRate = kSampleRate;
+  cfg.dataCallback = MultiCaptureCallback;
+  cfg.pUserData = impl_.get();
+
+  if (ma_device_init(nullptr, &cfg, &impl_->device) != MA_SUCCESS) {
+    if (error) *error = "failed to open capture device \"" + name + "\"";
+    return false;
+  }
+  impl_->channels = static_cast<int>(impl_->device.capture.channels);
+  if (ma_device_start(&impl_->device) != MA_SUCCESS) {
+    ma_device_uninit(&impl_->device);
+    if (error) *error = "failed to start capture device \"" + name + "\"";
+    return false;
+  }
+  impl_->started = true;
+  return true;
+}
+
+void MultiCaptureDevice::Stop() {
+  if (!impl_ || !impl_->started) return;
+  ma_device_uninit(&impl_->device);
+  impl_->started = false;
+}
+
+bool MultiCaptureDevice::running() const { return impl_ && impl_->started; }
+
+int MultiCaptureDevice::channels() const { return impl_ ? impl_->channels : 0; }
+
+uint64_t MultiCaptureDevice::frames() const {
+  return impl_ ? impl_->frames.load(std::memory_order_relaxed) : 0;
+}
+
 // --- MonitorDevice ----------------------------------------------------------
 
 struct MonitorDevice::Impl {
