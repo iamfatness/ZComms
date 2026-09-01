@@ -133,6 +133,21 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
 .stat{display:flex;justify-content:space-between;font:12px var(--mono);
   color:var(--legend);padding:2px 0}
 .stat b{color:var(--ivory);font-weight:400}
+/* extern feeds */
+.field input{background:var(--rack);border:1px solid var(--edge);
+  color:var(--ivory);font:13px var(--mono);padding:10px 12px;min-width:0}
+.field input:focus{outline:none;border-color:var(--amber)}
+.feedrow{display:flex;gap:8px;align-items:center;font:12px var(--mono);
+  color:var(--ivory);padding:3px 0}
+.feedrow .fspec{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.feedrow .fdot{width:8px;height:8px;border-radius:50%;background:var(--edge);flex:none}
+.feedrow .fdot.live{background:var(--amber)}
+.feedrow .fdot.idle{background:var(--green)}
+.feedrow .fdot.dead{background:var(--red)}
+.feedrow button{appearance:none;border:1px solid var(--edge);
+  background:var(--panel-key);color:var(--ivory);cursor:pointer;
+  font:10px var(--mono);letter-spacing:.12em;padding:5px 8px}
+.feedrow button.on{border-color:var(--amber);color:var(--amber)}
 /* edit-talent list */
 .editlist{display:none;width:100%;max-width:920px;flex-direction:column;gap:8px}
 .editlist.show{display:flex}
@@ -202,6 +217,15 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
         <button id="g-dn" aria-label="gain down">–</button>
         <b id="g-val">0 dB</b>
         <button id="g-up" aria-label="gain up">+</button>
+      </div>
+    </div>
+    <div class="field"><label>extern feeds — device channel latched into a comms channel</label>
+      <div id="feedlist"></div>
+      <div class="row">
+        <select id="feedslot" title="talkback channel" style="width:74px;flex:none"></select>
+        <select id="feeddev" title="capture device" style="flex:1;min-width:0"></select>
+        <input id="feedchans" placeholder="ch (3 or 3-4)" style="width:96px;flex:none">
+        <button class="tog" id="feedset">SET</button>
       </div>
     </div>
     <div class="field"><label>station</label>
@@ -315,6 +339,9 @@ function updateGrid(){
       :!ch.ready?'forming…'
       :c.row.group?(ch.listeners+' listening')
       :hearing?'ready':'invite in flight')+partial;
+    const fd=(S.feeds||[]).find(f=>f.slot===c.row.slot);
+    if(fd&&fd.latch)c.st.textContent+=
+      !fd.ok?' · FEED DEAD':(fd.peak>103?' · FEED ●':' · feed');
   });
 }
 
@@ -358,6 +385,44 @@ $('aec').onclick=()=>act('aec',(S.aec?'off':'on'));
 $('tone').onclick=()=>act('tone',(S.tone?'off':'on'));
 $('g-dn').onclick=()=>act('gain',(S.gain-1));
 $('g-up').onclick=()=>act('gain',(S.gain+1));
+
+/* extern feeds: a device channel latched into a comms channel. State is
+   server truth (S.feeds); rows are stateless buttons over verbs. */
+for(let i=0;i<16;i++){const o=document.createElement('option');
+  o.value=i;o.textContent='CH '+(i+1);$('feedslot').appendChild(o);}
+const feeddevsig={v:''};
+$('feedset').onclick=()=>{
+  const ch=$('feedchans').value.trim();
+  if(!/^\d+(-\d+)?$/.test(ch)){$('feedchans').focus();return;}
+  act('feed','set '+$('feedslot').value+' '+$('feeddev').value+':'+ch);};
+function renderFeeds(){
+  const devs=(S.mics||[]).join('|');
+  if(devs!==feeddevsig.v){feeddevsig.v=devs;const s=$('feeddev');s.innerHTML='';
+    (S.mics||[]).forEach(n=>{const o=document.createElement('option');
+      o.value=n;o.textContent=n;s.appendChild(o);});}
+  const fl=$('feedlist');fl.innerHTML='';
+  (S.feeds||[]).forEach(f=>{
+    const row=document.createElement('div');row.className='feedrow';
+    const dot=document.createElement('i');
+    /* 103 ~ -50 dBFS: the same threshold the duck's signal gate uses */
+    dot.className='fdot '+(!f.ok?'dead':(f.latch&&f.peak>103?'live':'idle'));
+    dot.title=!f.ok?'capture device dead'
+      :(f.latch?(f.peak>103?'latched · audio flowing':'latched · silent'):'unlatched');
+    const sp=document.createElement('span');sp.className='fspec';
+    sp.textContent='CH '+(f.slot+1)+' ← '+f.spec+' '+(f.gain>0?'+':'')+f.gain+'dB';
+    sp.title=sp.textContent;
+    const lb=document.createElement('button');if(f.latch)lb.className='on';
+    lb.textContent='LATCH';
+    lb.onclick=()=>act('feed','latch '+f.slot+' '+(f.latch?'off':'on'));
+    const gd=document.createElement('button');gd.textContent='−';
+    gd.onclick=()=>act('feed','gain '+f.slot+' '+(f.gain-1));
+    const gu=document.createElement('button');gu.textContent='+';
+    gu.onclick=()=>act('feed','gain '+f.slot+' '+(f.gain+1));
+    const rm=document.createElement('button');rm.textContent='✕';
+    rm.title='remove feed';rm.onclick=()=>act('feed','off '+f.slot);
+    row.append(dot,sp,lb,gd,gu,rm);fl.appendChild(row);
+  });
+}
 let micSig='',outSig='';
 function fillSel(sel,list,current,sig,verb){
   const s=(list||[]).join('|')+'@'+current;
@@ -480,6 +545,7 @@ function render(){
   $('g-val').textContent=(S.gain>0?'+':'')+S.gain+' dB';
   fillSel($('micsel'),S.mics,S.mic,micsig,'setmic');
   fillSel($('outsel'),S.outs,S.out,outsig,'setout');
+  renderFeeds();
   /* station room: MAIN + every breakout, applied via the room verb */
   $('roomfield').style.display=S.bostarted?'':'none';
   if(S.bostarted){

@@ -15,6 +15,9 @@ int main() {
   TestSignalProtocol();
   TestSignalOutbox();
   TestDuckPlan();
+  TestSignalGate();
+  TestChannelMix();
+  TestExternFeed();
   TestCrashTrap();
 
   const auto& failures = zctest::Failures();
