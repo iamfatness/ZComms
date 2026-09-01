@@ -185,11 +185,24 @@ the screen the diagnosis surface: every fatal route (std::terminate,
 SIGABRT, CRT invalid parameter, purecall, unhandled SEH, plus a try/catch
 around Run() so a main-thread throw keeps its type and what()) logs
 `FATAL: <detail>` and holds a system-modal "ZComms crashed" box showing
-the same text. `zcomms --selftest-crash throw|abort|av` (hidden flag)
-proves the trap on any machine. Gotcha: `src/audio/signal.h` shadows the
-CRT's `<signal.h>` on the app's include path, so `<csignal>` does not
-compile there -- crash_trap.cpp declares `signal()` itself. The field
-crash's ROOT CAUSE is still open; the trap exists to name it next time.
+the same text. `zcomms --selftest-crash throw|abort|av|invalidparam`
+(hidden flag) proves the trap on any machine. Gotcha: `src/audio/signal.h`
+shadows the CRT's `<signal.h>` on the app's include path, so `<csignal>`
+does not compile there -- crash_trap.cpp declares `signal()` itself.
+
+ROOT CAUSE, live-diagnosed 2026-09-01 via the v0.1.7 crash box + a photo
+of the log: **a CRT invalid parameter raised on a background thread right
+after InitSDK -- the Zoom SDK's own post-init work on that locked-down
+machine** (the handler is process-wide; sdk.dll shares our ucrtbase). The
+log proved the main thread healthy underneath the box: auth SUCCESS,
+join, meeting CONNECTING. v0.1.8 therefore makes the invalid-parameter
+route NON-FATAL by policy -- the CRT's defined continue semantics (the
+call fails with EINVAL), logged loud/counted/rate-limited
+(`InvalidParameterCount()`); every other route stays fatal. Also from
+that log: BindStdio now opens BOTH streams `"a"` -- the original "w"/"a"
+split gave stdout and stderr independent file positions and shuffled the
+FATAL line into the middle of the first field crash log; chronology in a
+crash log is evidence.
 
 ### The talkback delivery laws (2026-08-29, a full day of live hunting)
 
