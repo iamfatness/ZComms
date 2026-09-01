@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -53,12 +54,28 @@ void OnTerminate() {
 // that WER reported as ucrtbase 0xc0000409. This is that crash's named route.
 void OnSigAbrt(int) { Die("abort() called (CRT fail-fast path)"); }
 
-// Release-CRT invalid-parameter callbacks carry all-null arguments; the fact
-// that this route fired is the whole message.
+// CRT invalid parameter: NOT fatal, by policy. Live-diagnosed 2026-09-01 on
+// a work-managed machine: the Zoom SDK's own post-init background thread
+// trips this (the handler is process-wide; sdk.dll shares our ucrtbase),
+// and the default handler's fail-fast was the whole v0.1.6 "crashes at
+// join" -- the log showed auth SUCCESS and the meeting reaching CONNECTING
+// underneath the v0.1.7 crash box. Returning from the handler is defined
+// behavior: the offending call fails with errno EINVAL and execution
+// continues. So: loud, counted, rate-limited -- never dead. Our own code
+// hitting this surfaces as a failed CRT call plus these lines.
+std::atomic<unsigned> g_invalid_param_count{0};
 void OnInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*,
                         unsigned, uintptr_t) {
-  Die("CRT invalid parameter (a CRT call rejected its arguments; the release "
-      "CRT withholds which)");
+  const unsigned n = g_invalid_param_count.fetch_add(1) + 1;
+  if (n <= 5 || n % 100 == 0) {
+    std::printf(
+        "WARNING: CRT invalid parameter #%u -- some module passed bad "
+        "arguments to a CRT call; the call failed with EINVAL and the app "
+        "continues (seen from the Zoom SDK's own threads on locked-down "
+        "machines)\n",
+        n);
+    std::fflush(stdout);
+  }
 }
 
 void OnPureCall() { Die("pure virtual function call"); }
@@ -93,6 +110,8 @@ LONG WINAPI OnUnhandledSeh(EXCEPTION_POINTERS* info) {
 }
 
 }  // namespace
+
+unsigned InvalidParameterCount() { return g_invalid_param_count.load(); }
 
 const char* SehCodeName(unsigned long code) {
   switch (code) {

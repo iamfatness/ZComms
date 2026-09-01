@@ -22,6 +22,11 @@ void InstallCrashTrap();
 // sdk.dll fastfails in its own DLL_PROCESS_DETACH and would bury the story).
 [[noreturn]] void Die(const std::string& what);
 
+// How many CRT invalid-parameter reports the trap has absorbed. That route
+// is deliberately NON-fatal (see crash_trap.cpp): the offending call fails
+// with EINVAL and execution continues; this counter is the audit trail.
+unsigned InvalidParameterCount();
+
 // Pure, unit-tested pieces of the message the handlers assemble.
 // Human name for the SEH codes worth recognizing on sight; "" for the rest.
 const char* SehCodeName(unsigned long code);

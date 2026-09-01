@@ -2,6 +2,8 @@
 // photograph off a locked-down machine. The field crash that motivated all
 // of this (2026-08-31) surfaced as nothing but "ucrtbase.dll 0xc0000409" in
 // Event Viewer; these strings are the difference between that and an answer.
+#include <io.h>
+
 #include <stdexcept>
 #include <string>
 
@@ -44,4 +46,14 @@ void TestCrashTrap() {
     ZC_CHECK(zc::DescribeActiveCppException() ==
              "C++ exception not derived from std::exception");
   }
+
+  // Installs the REAL handlers in the test process, so keep this the last
+  // test: a CRT invalid parameter must be absorbed and counted, never
+  // fatal -- the Zoom SDK's own threads trip it on locked-down machines
+  // (live, 2026-09-01), and dying for it was the v0.1.6 field crash.
+  ZC_TEST("crash_trap: invalid parameter is absorbed, counted, not fatal");
+  zc::InstallCrashTrap();
+  ZC_CHECK(zc::InvalidParameterCount() == 0);
+  _close(-99);  // documented to invoke the handler, then fail with EBADF
+  ZC_CHECK(zc::InvalidParameterCount() == 1);
 }

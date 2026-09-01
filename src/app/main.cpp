@@ -11,6 +11,7 @@
 // ship-blocking for release; this build states the headset requirement
 // loudly instead), sign-in, packaging.
 #include <windows.h>
+#include <io.h>
 #include <shellapi.h>
 #include <timeapi.h>
 #include <tlhelp32.h>
@@ -116,7 +117,12 @@ void BindStdio() {
                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
   const std::string path = dir + name;
   FILE* f = nullptr;
-  freopen_s(&f, path.c_str(), "w", stdout);
+  // Both streams in APPEND mode: the timestamped name is fresh each launch,
+  // and "a" makes every write land at true EOF. The original "w"/"a" split
+  // gave the two streams independent file positions, which shuffled a
+  // FATAL (stderr) line into the middle of the stdout stream on the first
+  // field crash log -- chronology in a crash log is evidence, keep it.
+  freopen_s(&f, path.c_str(), "a", stdout);
   freopen_s(&f, path.c_str(), "a", stderr);
 }
 
@@ -432,7 +438,16 @@ int Run(int argc, char** argv) {
       if (mode == "throw") throw std::out_of_range("crash-trap selftest");
       if (mode == "abort") std::abort();
       if (mode == "av") *static_cast<volatile int*>(nullptr) = 1;
-      std::printf("ERROR: --selftest-crash takes throw|abort|av\n");
+      if (mode == "invalidparam") {
+        // This one must SURVIVE: the route is non-fatal by policy. _close
+        // on a bad descriptor is documented to invoke the handler, then
+        // fail with EBADF.
+        _close(-99);
+        std::printf("[crash-trap] survived invalid parameter, count=%u\n",
+                    InvalidParameterCount());
+        return InvalidParameterCount() == 1 ? 0 : 2;
+      }
+      std::printf("ERROR: --selftest-crash takes throw|abort|av|invalidparam\n");
       return 2;
     }
     else {
