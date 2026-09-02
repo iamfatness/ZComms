@@ -79,11 +79,16 @@ needed since the chirp/matched-filter rework.
 
 Open defects (2026-08-28), still standing:
 
-- **zcomms main-thread hang (AppHangB1), one occurrence.** ~40 s after a
-  phase that sent 8 s of audio into an **empty** channel, the main loop
-  stopped pumping and Windows killed the process. Not reproduced (2026-08-29's
-  phase B also sent into an empty-of-listeners keyed channel without
-  incident). Instrument before trusting long unattended runs.
+- **zcomms hang (AppHangB1), two occurrences, STILL UNDIAGNOSED but now
+  INSTRUMENTED.** 2026-08-28: ~40 s after a phase that sent 8 s of audio into
+  an **empty** channel, the main loop stopped pumping and Windows killed the
+  process. 2026-09-02 (v0.1.10, owner's machine): ~4 minutes in with the
+  settings drawer open, same WER class, and the run left NO log because
+  `BindStdio` skipped the file whenever a console was inherited. Neither is
+  reproduced. What changed 2026-09-02: the log is always written and always
+  readable, and BOTH loops (main and the shell window's message pump) are
+  watched by watchdogs that report out-of-band -- see "The diagnostic stream
+  + the two watchdogs". The next occurrence should name itself.
 - ~~zcomms-tap Goertzel fragility~~ — fixed 2026-08-28: chirp probe +
   matched-filter/PSR detection; field-proven both directions on a noisy bus.
 
@@ -138,17 +143,100 @@ Verified before the live run:
 Run `--self-test` before believing any live figure; the live run has no ground
 truth by construction, so that is the only place the instrument gets checked.
 
+### The diagnostic stream + the two watchdogs (2026-09-02, from the v0.1.10 hang)
+
+v0.1.10 wedged on the owner's machine ~4 minutes in, settings drawer open.
+WER logged **AppHangB1** -- "zcomms.exe stopped interacting with Windows and
+was closed" -- which is a HANG, not a fault, so the v0.1.7 crash trap could
+not fire. The investigation then hit two defects that made the incident
+unknowable, and both are now fixed in `src/app/diag_log.{h,cpp}`:
+
+1. **A console-launched run wrote no log at all.** `BindStdio()` returned
+   early whenever `STD_OUTPUT_HANDLE` was valid, so a run started from a
+   shell never opened anything under `%APPDATA%\ZComms\logs`. The owner's
+   failing run left zero trace. Now stdout/stderr go into a pipe and a pump
+   thread fans each line out to the log file **always** and to the console
+   when one exists.
+2. **The log could not be read while the app ran.** `freopen_s(..., "a")`
+   opens with no share flags: `Get-Content` and even
+   `File.Open(FileShare.ReadWrite)` failed with a sharing violation. During a
+   hang the log IS the evidence. The pump now opens it `FILE_APPEND_DATA` +
+   `FILE_SHARE_READ|WRITE|DELETE`, and being the ONE writer strengthens the
+   v0.1.8 chronology guarantee rather than weakening it.
+3. **Logs grew unbounded** -- 43.9 MB from one session, almost all of it the
+   `\r` status meter repainted every tick (~2 KB/s, and on disk `\r`
+   overwrites nothing, so it was ONE 43 MB line). The splitter
+   (`diag_line.h`, unit-tested) routes `\n`-terminated lines to file+console
+   and `\r` segments to the console ONLY; the meter is throttled to 4 Hz and
+   drawn only when a real console window exists; a `[heartbeat]` line carries
+   the same counters into the log once a minute. Parts cap at 8 MB (4 parts,
+   cycled and truncated on reuse) and the directory keeps the last 10 runs.
+
+Instruments, both proven with `--selftest-hang <ui|main> <seconds>` (hidden,
+the sibling of `--selftest-crash` -- an instrument nobody has watched work is
+a guess, and v0.1.10 shipped a watchdog that had never fired):
+
+- **The main-loop watchdog is now app-lifetime**, not session-scoped. It used
+  to be created inside the meeting session, leaving the join-card loop --
+  where the app sits whenever it is not in a meeting, drawer fully usable --
+  watched by nothing.
+- **A UI-thread watchdog** (`shell_window.cpp`). AppHangB1 is about the
+  window's thread, which is the WebView2 STA thread, not the main loop. The
+  pump beats every iteration and on a 500 ms `WM_TIMER` (an idle
+  `GetMessageW` blocks legitimately and would otherwise look wedged); a
+  watcher thread reports the thread id, the duration, and what the MAIN loop
+  was doing (`SetMainPhase`/`MainPhaseDescription`).
+- **Both report through `DiagEmergency`, never printf.** printf can BE the
+  hang: a console wedged by a QuickEdit text selection blocks every writer
+  inside the CRT's stdout lock, and the old watchdog reported down exactly
+  that channel. `DiagEmergency` writes with `WriteFile` to its own appending
+  handle plus `OutputDebugStringA`.
+- Stalls report at the crossing and again every threshold, so a log tail full
+  of stall lines is unmistakably "it died hung" rather than "it blipped".
+- **Quit is bounded**: closing the shell window only sets `quit_req`, and if
+  the main loop has not finished teardown 20 s later we name the phase and
+  exit ourselves instead of waiting for Windows to report the hang.
+
+Two gotchas found building this, both worth not rediscovering:
+
+- **Do not keep the raw inherited `STD_OUTPUT_HANDLE` value.**
+  `freopen("NUL", stdout)` closes fd 1, which closes that handle, and Windows
+  hands the freed slot to the next `CreatePipe` -- the console sink then
+  pointed at our own pipe and the pump read what it had just written (50 MB
+  of the same three startup lines in six seconds). `DuplicateHandle` first.
+- **`PeekNamedPipe` from another thread deadlocks against the pump's blocking
+  `ReadFile`** on the same handle (synchronous file objects serialise). The
+  first `DiagFlush` did that and hung every exit path. It now pushes a
+  sentinel line down the pipe and waits for the pump to acknowledge it.
+
+**NOT diagnosed: the v0.1.10 hang itself.** The shell thread waits on nothing
+the main thread holds -- every control-surface action stores an atomic or
+pushes to a mutex-guarded edge list on a ControlServer thread, the panel's
+only channels are `fetch` and `EventSource`, and the shell thread's sole
+cross-thread traffic is `quit_req`. The invariant in shell_window.cpp's header
+holds in code. The strongest untested suspects, in order: console output
+wedging the main thread inside the CRT stdout lock (the meter was writing 2
+KB/s to conhost, and a QuickEdit selection blocks writers indefinitely --
+addressed by moving console writes behind a dropping queue on their own
+thread); and the 5-second device enumeration, which builds and destroys a
+whole `ma_context` -- `CoInitializeEx(MTA)` + one `IMMDevice::Activate` per
+device -- on the main loop, bounded only by the slowest audio driver
+installed. Both now name themselves in the log if they are it.
+
 ### A real windowed app (2026-08-30)
 
 `zcomms.exe` is a **Windows-subsystem** exe (`WIN32_EXECUTABLE`, entry still
 `main()` via `/ENTRY:mainCRTStartup`): double-clicking never creates a
 console -- the console window alongside the panel read as not-a-real-app
-(owner). The printf diagnostic stream is still load-bearing; `BindStdio()`
-in main.cpp routes it once at startup, in priority order: an
-already-redirected stdout is honored (pipes/scripted runs), a parent
-terminal is attached (dev runs -- note the shell prompt returns immediately;
-GUI exes are not waited on), else a dated log file under
-`%APPDATA%\ZComms\logs\`. Console hotkeys run only when a console exists
+(owner). The printf diagnostic stream is still load-bearing;
+**`StartDiagnostics()` in diag_log.cpp now routes it, superseding
+`BindStdio()`'s pick-ONE-destination policy** -- that early return cost the
+whole v0.1.10 hang investigation (see the section above). A dated log file
+under `%APPDATA%\ZComms\logs\` is written unconditionally, and teed to a
+console when one exists: an already-redirected/inherited stdout
+(pipes, scripted runs) or the parent terminal via AttachConsole (dev runs --
+note the shell prompt returns immediately; GUI exes are not waited on).
+Console hotkeys and the status meter run only when a console WINDOW exists
 (`g_console_keys`); the old hide-the-console hack is gone -- any console
 present now belongs to the operator's own terminal.
 
@@ -199,7 +287,7 @@ join, meeting CONNECTING. v0.1.8 therefore makes the invalid-parameter
 route NON-FATAL by policy -- the CRT's defined continue semantics (the
 call fails with EINVAL), logged loud/counted/rate-limited
 (`InvalidParameterCount()`); every other route stays fatal. Also from
-that log: BindStdio now opens BOTH streams `"a"` -- the original "w"/"a"
+that log: the diagnostic stream opens in APPEND mode -- the original "w"/"a"
 split gave stdout and stderr independent file positions and shuffled the
 FATAL line into the middle of the first field crash log; chronology in a
 crash log is evidence.

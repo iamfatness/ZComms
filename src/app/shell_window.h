@@ -12,6 +12,12 @@
 
 namespace zc {
 
+// Hidden self-test: blocks the shell window's message pump for `seconds` so
+// the UI watchdog can be PROVEN to fire on any machine, the same way
+// --selftest-crash proves the crash trap. An instrument nobody has watched
+// work is a guess. No-op if the shell window is not up.
+void ShellStallSelfTest(int seconds);
+
 // True when the WebView2 runtime is installed (evergreen on Win 11; absent
 // only on unmanaged older machines, where the caller falls back to a browser
 // window).

@@ -14,10 +14,14 @@
 #include <shlobj.h>
 #include <wrl.h>
 
+#include <atomic>
 #include <cstdio>
+#include <string>
 #include <thread>
 
 #include "WebView2.h"
+#include "diag_log.h"
+#include "stall_watch.h"
 
 namespace zc {
 namespace {
@@ -27,6 +31,61 @@ using Microsoft::WRL::ComPtr;
 
 // Owned by the shell thread only.
 ComPtr<ICoreWebView2Controller> g_controller;
+
+// --- The UI-thread watchdog -------------------------------------------------
+// v0.1.10 wedged on the owner's machine and Windows logged AppHangB1 --
+// "zcomms.exe stopped interacting with Windows and was closed". That class is
+// specifically about a top-level window whose thread stops servicing messages,
+// which here is THIS thread, not the main loop. The v0.1.7 crash trap could
+// not fire (nothing faulted) and the main-loop watchdog was watching the wrong
+// loop, so the incident left a WER entry and nothing else.
+//
+// So the pump beats: once per iteration, and once per WM_TIMER so an IDLE
+// GetMessageW (which blocks, legitimately, for as long as nothing happens)
+// still counts as alive. A separate thread notices when the beat stops and
+// writes the fact -- with this thread's id, the duration, and what the main
+// loop was doing -- through DiagEmergency, which takes neither the CRT stdout
+// lock nor the diagnostic pipe. Reporting a hang down a channel the hang can
+// block is how the last one stayed invisible.
+constexpr UINT_PTR kBeatTimerId = 1;
+constexpr UINT kBeatTimerMs = 500;
+// Well above any legitimate pause. WebView2 creation and navigation are async;
+// nothing on this thread is allowed to take four seconds.
+constexpr int64_t kStallThresholdMs = 4000;
+
+std::atomic<long long> g_pump_beat_ms{0};
+std::atomic<unsigned long> g_shell_tid{0};
+std::atomic<bool> g_pump_running{false};
+std::atomic<HWND> g_hwnd{nullptr};
+
+// The self-test's deliberate stall (see ShellStallSelfTest).
+constexpr UINT kMsgStallSelfTest = WM_APP + 1;
+
+void BeatPump() {
+  g_pump_beat_ms.store(static_cast<long long>(GetTickCount64()));
+}
+
+void ShellWatchdogThread() {
+  StallWatch watch(kStallThresholdMs);
+  while (g_pump_running.load()) {
+    Sleep(500);
+    const int64_t now_ms = static_cast<int64_t>(GetTickCount64());
+    watch.Beat(g_pump_beat_ms.load());
+    int64_t age = 0;
+    if (watch.Poll(now_ms, &age)) {
+      DiagEmergency(
+          "[watchdog] UI MESSAGE PUMP STALLED " + std::to_string(age) +
+          " ms -- shell thread " + std::to_string(g_shell_tid.load()) +
+          " is not servicing messages; Windows reports this as AppHangB1 and "
+          "will kill the process. Main loop was in: " + MainPhaseDescription());
+    }
+    int64_t lasted = 0;
+    if (watch.ConsumeRecovery(&lasted)) {
+      DiagEmergency("[watchdog] UI message pump recovered after " +
+                    std::to_string(lasted) + " ms");
+    }
+  }
+}
 
 // The panel's designed client size; the frame is added around it so the page
 // renders at exactly the size it was designed (and screenshot-approved) at.
@@ -67,6 +126,23 @@ LRESULT CALLBACK ShellProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       if (g_controller) {
         g_controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
       }
+      return 0;
+    case WM_TIMER:
+      // The idle beat. GetMessageW blocks indefinitely when nothing is
+      // happening, which is healthy but indistinguishable from wedged without
+      // this: a pump that can still deliver a timer is servicing messages.
+      if (wp == kBeatTimerId) {
+        BeatPump();
+        return 0;
+      }
+      return DefWindowProcW(hwnd, msg, wp, lp);
+    case kMsgStallSelfTest:
+      // Deliberately does NOT beat: this is what a swallowed message looks
+      // like, and the watchdog must say so while it is happening.
+      std::printf("[ui] selftest: blocking the message pump for %d s\n",
+                  static_cast<int>(wp));
+      Sleep(static_cast<DWORD>(wp) * 1000);
+      std::printf("[ui] selftest: pump released\n");
       return 0;
     case WM_DESTROY:
       PostQuitMessage(0);
@@ -133,6 +209,15 @@ void ShellThread(std::wstring url, std::function<void()> on_closed) {
                         sizeof(dark));
   ShowWindow(hwnd, SW_SHOW);
 
+  g_hwnd.store(hwnd);
+  g_shell_tid.store(GetCurrentThreadId());
+  BeatPump();
+  g_pump_running.store(true);
+  SetTimer(hwnd, kBeatTimerId, kBeatTimerMs, nullptr);
+  std::thread(ShellWatchdogThread).detach();
+  std::printf("[ui] shell window up on thread %lu (message pump watched)\n",
+              GetCurrentThreadId());
+
   CreateCoreWebView2EnvironmentWithOptions(
       nullptr, UserDataDir().c_str(), nullptr,
       Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
@@ -182,9 +267,16 @@ void ShellThread(std::wstring url, std::function<void()> on_closed) {
 
   MSG m;
   while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+    // Beat BEFORE dispatch as well as after: a handler that never returns is
+    // exactly the case being watched, and the pre-beat is what makes the
+    // reported stall duration start at the message that swallowed the thread.
+    BeatPump();
     TranslateMessage(&m);
     DispatchMessageW(&m);
+    BeatPump();
   }
+  g_pump_running.store(false);
+  g_hwnd.store(nullptr);
   g_controller.Reset();
   if (on_closed) on_closed();
   CoUninitialize();
@@ -200,6 +292,15 @@ std::wstring Widen(const std::string& s) {
 }
 
 }  // namespace
+
+void ShellStallSelfTest(int seconds) {
+  const HWND h = g_hwnd.load();
+  if (h == nullptr) {
+    std::printf("[ui] selftest: no shell window to stall\n");
+    return;
+  }
+  PostMessageW(h, kMsgStallSelfTest, static_cast<WPARAM>(seconds), 0);
+}
 
 bool ShellWindowAvailable() {
   wchar_t* ver = nullptr;

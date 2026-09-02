@@ -153,10 +153,10 @@ endif()
 if(ZCOMMS_HAVE_SDK)
   add_executable(zcomms src/app/main.cpp src/app/control_server.cpp
                         src/app/zoom_oauth.cpp src/app/crash_trap.cpp
-                        src/app/version.rc)
+                        src/app/diag_log.cpp src/app/version.rc)
   # A real windowed app: no console of its own, ever. main() stays the entry
-  # point; BindStdio() in main.cpp decides where diagnostics land (pipe,
-  # parent terminal, or a log file).
+  # point; StartDiagnostics() in diag_log.cpp routes the printf stream -- log
+  # file ALWAYS, teed to a console when one exists.
   set_target_properties(zcomms PROPERTIES WIN32_EXECUTABLE TRUE)
   if(MSVC)
     target_link_options(zcomms PRIVATE "/ENTRY:mainCRTStartup")
@@ -227,7 +227,9 @@ add_executable(zcomms_audio_tests
   tests/zoom/test_signal_outbox.cpp
   tests/zoom/test_duck_plan.cpp
   tests/audio/test_crash_trap.cpp
+  tests/app/test_diag.cpp
   src/app/crash_trap.cpp
+  src/app/diag_log.cpp
   src/zoom/room_plan.cpp
   src/zoom/reach.cpp
   src/zoom/signal_protocol.cpp

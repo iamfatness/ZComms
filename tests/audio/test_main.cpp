@@ -19,6 +19,7 @@ int main() {
   TestChannelMix();
   TestExternFeed();
   TestCrashTrap();
+  TestDiag();
 
   const auto& failures = zctest::Failures();
   std::printf("\n");
