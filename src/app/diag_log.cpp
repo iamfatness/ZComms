@@ -6,21 +6,22 @@
 
 #include <algorithm>
 #include <atomic>
-#include <condition_variable>
 #include <cstdio>
-#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "console_queue.h"
 #include "diag_line.h"
+#include "log_parts.h"
 
 namespace zc {
 namespace {
 
-// One log part is capped, and a run keeps a bounded number of parts. The 43.9
-// MB single-session file that motivated this was mostly status repaints (now
+// One log part is capped, and a run keeps a bounded number of parts, CYCLING
+// (log_parts.h carries the policy and the incident). The 43.9 MB
+// single-session file that motivated this was mostly status repaints (now
 // console-only), but a long show with a chatty SDK can still fill a file, and
 // "the log ate the disk" is not a failure mode a broadcast tool gets to have.
 constexpr long long kMaxPartBytes = 8LL * 1024 * 1024;
@@ -29,11 +30,15 @@ constexpr int kMaxParts = 4;
 // history for "it hung yesterday" and bounds the directory forever.
 constexpr size_t kKeepRuns = 10;
 
-// The console sink is behind a bounded, dropping queue on its own thread.
-// Writing to a console can block INDEFINITELY -- select text in a QuickEdit
-// console and every writer to it stops dead -- and that must not be able to
-// reach the main loop through the CRT's stdout lock.
+// The console sink is behind a bounded, dropping queue on its own thread
+// (console_queue.h, which carries the incident and the property). Writing to a
+// console can block INDEFINITELY and that must never reach the main loop
+// through the CRT's stdout lock.
 constexpr size_t kConsoleQueueMax = 256;
+// How often a run of drops is allowed to say so in the file. A wedged console
+// drops every line it is handed; one note per second is enough to say "the
+// console tail is incomplete, this file is not".
+constexpr DWORD kDropNoteEveryMs = 1000;
 
 // DiagFlush's handshake. It cannot ask the pipe how much is left: the pump
 // sits in a blocking ReadFile on that handle, and a synchronous file object
@@ -54,15 +59,14 @@ struct Diag {
   std::string stamp;
   std::string path;              // current part; guarded by path_m
   std::mutex path_m;
-  long long part_bytes = 0;
-  int part = 0;
-  std::atomic<bool> running{false};
+  LogParts parts{kMaxPartBytes, kMaxParts};
   std::thread pump;
   std::thread console_pump;
-  std::mutex q_m;
-  std::condition_variable q_cv;
-  std::deque<std::string> q;
-  std::atomic<unsigned> console_dropped{0};
+  // The console hand-off owns its own lock and wait (console_queue.h): the
+  // no-block-on-a-wedged-console property IS the synchronisation, so it lives
+  // in one place a test can drive.
+  ConsoleQueue q{kConsoleQueueMax};
+  unsigned long long dropped_noted = 0;  // last count written to the file
   std::atomic<unsigned> sync_seq{0};  // sentinels the pump has consumed
 };
 
@@ -82,14 +86,7 @@ std::string Stamp() {
 
 void OpenPart(Diag& d) {
   if (d.file != INVALID_HANDLE_VALUE) CloseHandle(d.file);
-  char name[96];
-  if (d.part == 0) {
-    std::snprintf(name, sizeof(name), "\\zcomms-%s.log", d.stamp.c_str());
-  } else {
-    std::snprintf(name, sizeof(name), "\\zcomms-%s.%d.log", d.stamp.c_str(),
-                  d.part);
-  }
-  const std::string path = d.dir + name;
+  const std::string path = d.dir + LogParts::Name(d.stamp, d.parts.part());
   // FILE_APPEND_DATA + share EVERYTHING: the whole point is that another
   // process can read this file WHILE the app holds it. The v0.1.10
   // investigation could not tail the log at all -- freopen_s opens with no
@@ -102,7 +99,6 @@ void OpenPart(Diag& d) {
   d.file = CreateFileA(path.c_str(), FILE_APPEND_DATA,
                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-  d.part_bytes = 0;
   std::lock_guard<std::mutex> lock(d.path_m);
   d.path = d.file == INVALID_HANDLE_VALUE ? std::string() : path;
 }
@@ -112,48 +108,49 @@ void WriteFileLine(Diag& d, const std::string& text) {
   DWORD wrote = 0;
   WriteFile(d.file, text.data(), static_cast<DWORD>(text.size()), &wrote,
             nullptr);
-  d.part_bytes += static_cast<long long>(text.size());
-  if (d.part_bytes >= kMaxPartBytes) {
+  if (d.parts.Wrote(static_cast<long long>(text.size()))) {
+    // next_part(), not part+1: with 4 parts the note used to point at a
+    // "part 4" that never exists, on the one roll that actually wraps.
     const std::string note = "[" + Stamp() + "] [diag] log part full (" +
                              std::to_string(kMaxPartBytes / (1024 * 1024)) +
                              " MB), continuing in part " +
-                             std::to_string(d.part + 1) + "\n";
+                             std::to_string(d.parts.next_part()) + "\n";
     WriteFile(d.file, note.data(), static_cast<DWORD>(note.size()), &wrote,
               nullptr);
-    d.part = (d.part + 1) % kMaxParts;
+    d.parts.Advance();
     OpenPart(d);
   }
 }
 
 void EnqueueConsole(Diag& d, const std::string& text) {
-  if (d.console == nullptr) return;
-  {
-    std::lock_guard<std::mutex> lock(d.q_m);
-    if (d.q.size() >= kConsoleQueueMax) {
-      // Drop, never block. A wedged console must cost the console's output,
-      // not the app's main loop.
-      d.console_dropped.fetch_add(1);
-      return;
-    }
-    d.q.push_back(text);
-  }
-  d.q_cv.notify_one();
+  // Drop, never block. A wedged console must cost the console's output, not
+  // the app's main loop -- ConsoleQueue::Push is the whole guarantee.
+  if (d.console != nullptr) d.q.Push(text);
+}
+
+// A drop is a hole in the console tail, and a reader comparing the two sinks
+// deserves to know which one is short. Written from the pump thread with
+// WriteFileLine (never printf: printf feeds the pipe this thread is draining).
+void NoteConsoleDrops(Diag& d) {
+  static DWORD next_ms = 0;
+  const DWORD now = GetTickCount();
+  const unsigned long long dropped = d.q.dropped();
+  if (dropped == d.dropped_noted || now < next_ms) return;
+  next_ms = now + kDropNoteEveryMs;
+  const std::string note =
+      "[diag] console wedged: dropped " +
+      std::to_string(dropped - d.dropped_noted) +
+      " console lines (" + std::to_string(dropped) +
+      " this run). The file below is complete; the console is not.\n";
+  d.dropped_noted = dropped;
+  WriteFileLine(d, "[" + Stamp() + "] " + note);
 }
 
 void ConsolePumpThread() {
   Diag& d = D();
   for (;;) {
     std::string text;
-    {
-      std::unique_lock<std::mutex> lock(d.q_m);
-      d.q_cv.wait(lock, [&] { return !d.q.empty() || !d.running.load(); });
-      if (d.q.empty()) {
-        if (!d.running.load()) return;
-        continue;
-      }
-      text = std::move(d.q.front());
-      d.q.pop_front();
-    }
+    if (!d.q.PopWait(&text)) return;
     DWORD wrote = 0;
     WriteFile(d.console, text.data(), static_cast<DWORD>(text.size()), &wrote,
               nullptr);
@@ -175,6 +172,7 @@ void PumpThread() {
       if (c.to_file) WriteFileLine(d, "[" + Stamp() + "] " + c.text);
       if (c.to_console) EnqueueConsole(d, c.text);
     }
+    NoteConsoleDrops(d);
   }
   const DiagChunk tail = split.Drain();
   if (tail.to_file) WriteFileLine(d, "[" + Stamp() + "] " + tail.text + "\n");
@@ -289,7 +287,6 @@ void StartDiagnostics() {
     SetStdHandle(STD_ERROR_HANDLE, live);
   }
 
-  d.running.store(true);
   d.pump = std::thread(PumpThread);
   d.pump.detach();
   if (d.console != nullptr) {
