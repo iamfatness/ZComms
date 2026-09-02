@@ -144,13 +144,22 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
   align-items:center;margin-top:6px}
 .feedform > label{justify-self:start}
 .feedhint{font:11px var(--mono);color:var(--dim);grid-column:2}
-/* row per live feed: the spec gets the free space, controls are fixed. */
+/* row per live feed, stacked: WHO hears it on top, the source under it.
+   A name and a device name cannot share one line at this width without
+   one of them being cut, and the one that must never be cut is the
+   person -- so each gets the full text column instead. */
 .feedrow{display:grid;
   grid-template-columns:8px minmax(0,1fr) auto auto auto auto auto;
-  gap:10px;align-items:center;font:13px var(--mono);color:var(--ivory);
-  padding:6px 0;border-top:1px solid var(--edge)}
-.feedrow .fspec{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.feedrow .fspec i{font-style:normal;color:var(--dim)}
+  grid-template-rows:auto auto;gap:2px 10px;align-items:center;
+  font:13px var(--mono);color:var(--ivory);
+  padding:7px 0;border-top:1px solid var(--edge)}
+.feedrow .fdot,.feedrow button,.feedrow .fgain{grid-row:1/3}
+.feedrow .fwho,.feedrow .fsrc{grid-column:2;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.feedrow .fwho{grid-row:1;font:600 14px var(--disp)}
+.feedrow .fwho.spare{font:13px var(--mono);color:var(--legend)}
+.feedrow .fsrc{grid-row:2;font:11px var(--mono);color:var(--legend)}
+.feedrow .fwho i,.feedrow .fsrc i{font-style:normal;color:var(--dim)}
 .feedrow .fgain{font:12px var(--mono);color:var(--legend);min-width:52px;
   text-align:center}
 .feedrow .fdot{width:8px;height:8px;border-radius:50%;background:var(--edge)}
@@ -232,7 +241,7 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
         <button id="g-up" aria-label="gain up">+</button>
       </div>
     </div>
-    <div class="field wide"><label>extern feeds — device channel latched into a comms channel</label>
+    <div class="field wide"><label>extern feeds — a device channel latched to whoever is on a comms channel</label>
       <div id="feedlist"></div>
       <div class="feedform">
         <label for="feeddev">source</label>
@@ -243,10 +252,11 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
           <input id="feedchans" placeholder="e.g. 3 or 3-4" style="display:none;flex:1;min-width:0">
         </div>
         <div class="feedhint" id="feedhint"></div>
-        <label for="feedslot">into</label>
+        <label for="feedslot">heard by</label>
         <div class="row">
-          <select id="feedslot" title="talkback channel" style="width:132px;flex:none"></select>
-          <button class="tog" id="feedset">SET</button>
+          <select id="feedslot" title="who this feed goes to"
+                  style="flex:1;min-width:0"></select>
+          <button class="tog" id="feedset" style="flex:none">SET</button>
         </div>
       </div>
     </div>
@@ -410,9 +420,35 @@ $('g-up').onclick=()=>act('gain',(S.gain+1));
 
 /* extern feeds: a device channel latched into a comms channel. State is
    server truth (S.feeds); rows are stateless buttons over verbs. */
-for(let i=0;i<16;i++){const o=document.createElement('option');
-  o.value=i;o.textContent='CH '+(i+1);$('feedslot').appendChild(o);}
-const feeddevsig={v:''},feedchsig={v:''};
+const feeddevsig={v:''},feedchsig={v:''},feedslotsig={v:''};
+/* A channel is a PERSON here, never a number: the panel already knows who
+   is on each slot, so the operator should never have to translate
+   "CH 7" back into a name. The number stays as the secondary detail
+   because it is what the ops log and the verbs speak. */
+function slotWho(i){
+  const c=(S.channels||[])[i]||{};
+  if(c.label)return{name:c.label,spare:false};
+  if(c.listeners>0)return{name:c.listeners+' listening',spare:false};
+  return{name:'',spare:true};}
+function renderSlotPick(){
+  const sel=$('feedslot');
+  const sig=[];for(let i=0;i<16;i++)sig.push(slotWho(i).name);
+  const s=sig.join('|');if(s===feedslotsig.v)return;feedslotsig.v=s;
+  const keep=sel.value;sel.innerHTML='';
+  const grp=t=>{const g=document.createElement('optgroup');g.label=t;
+    sel.appendChild(g);return g;};
+  let people=null,spares=null;
+  for(let i=0;i<16;i++){
+    const w=slotWho(i),o=document.createElement('option');o.value=i;
+    if(w.spare){
+      // A feed can be latched into a channel nobody is on yet, so spares
+      // stay selectable -- just below the people, and honest about it.
+      spares=spares||grp('spare channels');
+      o.textContent='ch '+(i+1)+' — nobody on it yet';spares.appendChild(o);
+    }else{
+      people=people||grp('on a channel now');
+      o.textContent=w.name+'  ·  ch '+(i+1);people.appendChild(o);}}
+  if([].some.call(sel.options,o=>o.value===keep))sel.value=keep;}
 /* Channel picks come from the device's own native count (S.micchans, parallel
    to S.mics). 0 means the backend would not say -- then the free-text field
    takes over rather than us inventing a channel map for hardware we cannot
@@ -451,7 +487,7 @@ function renderFeeds(){
     (S.mics||[]).forEach(n=>{const o=document.createElement('option');
       o.value=n;o.textContent=n;s.appendChild(o);});
     if((S.mics||[]).indexOf(keep)>=0)s.value=keep;}
-  renderChanPick();
+  renderChanPick();renderSlotPick();
   const fl=$('feedlist');fl.innerHTML='';
   (S.feeds||[]).forEach(f=>{
     const row=document.createElement('div');row.className='feedrow';
@@ -465,11 +501,21 @@ function renderFeeds(){
     const cut=f.spec.lastIndexOf(':');
     const dev=cut<0?f.spec:f.spec.slice(0,cut);
     const chs=cut<0?'':f.spec.slice(cut+1);
-    const sp=document.createElement('span');sp.className='fspec';
-    sp.textContent='CH '+(f.slot+1)+' ← '+dev+' ';
+    /* Lead with who hears this feed, not the slot it lands on. */
+    const w=slotWho(f.slot);
+    const who=document.createElement('span');
+    who.className='fwho'+(w.spare?' spare':'');
+    who.textContent=w.spare?('ch '+(f.slot+1)+' — nobody yet'):w.name;
+    const wn=document.createElement('i');
+    wn.textContent=w.spare?'':(' · ch '+(f.slot+1));
+    who.appendChild(wn);
+    who.title=who.textContent;
+    const sp=document.createElement('span');sp.className='fsrc';
+    const ar=document.createElement('i');ar.textContent='← ';
+    sp.append(ar,document.createTextNode(dev+' '));
     const ci=document.createElement('i');ci.textContent=chs?'ch '+chs:'';
     sp.appendChild(ci);
-    sp.title='CH '+(f.slot+1)+' ← '+f.spec;
+    sp.title='← '+f.spec;
     const gv=document.createElement('span');gv.className='fgain';
     gv.textContent=(f.gain>0?'+':'')+f.gain+' dB';
     const gd=document.createElement('button');gd.textContent='−';
@@ -483,7 +529,7 @@ function renderFeeds(){
     lb.onclick=()=>act('feed','latch '+f.slot+' '+(f.latch?'off':'on'));
     const rm=document.createElement('button');rm.textContent='✕';
     rm.title='remove feed';rm.onclick=()=>act('feed','off '+f.slot);
-    row.append(dot,sp,gd,gv,gu,lb,rm);fl.appendChild(row);
+    row.append(dot,who,sp,gd,gv,gu,lb,rm);fl.appendChild(row);
   });
 }
 let micSig='',outSig='';
