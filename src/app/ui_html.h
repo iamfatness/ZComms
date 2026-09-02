@@ -137,16 +137,29 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
 .field input{background:var(--rack);border:1px solid var(--edge);
   color:var(--ivory);font:13px var(--mono);padding:10px 12px;min-width:0}
 .field input:focus{outline:none;border-color:var(--amber)}
-.feedrow{display:flex;gap:8px;align-items:center;font:12px var(--mono);
-  color:var(--ivory);padding:3px 0}
-.feedrow .fspec{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.feedrow .fdot{width:8px;height:8px;border-radius:50%;background:var(--edge);flex:none}
+/* the feeds block spans the whole drawer: device names are long, and in a
+   260px auto-fit column every control in here truncates to noise. */
+.field.wide{grid-column:1/-1}
+.feedform{display:grid;grid-template-columns:86px 1fr;gap:10px 14px;
+  align-items:center;margin-top:6px}
+.feedform > label{justify-self:start}
+.feedhint{font:11px var(--mono);color:var(--dim);grid-column:2}
+/* row per live feed: the spec gets the free space, controls are fixed. */
+.feedrow{display:grid;
+  grid-template-columns:8px minmax(0,1fr) auto auto auto auto auto;
+  gap:10px;align-items:center;font:13px var(--mono);color:var(--ivory);
+  padding:6px 0;border-top:1px solid var(--edge)}
+.feedrow .fspec{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.feedrow .fspec i{font-style:normal;color:var(--dim)}
+.feedrow .fgain{font:12px var(--mono);color:var(--legend);min-width:52px;
+  text-align:center}
+.feedrow .fdot{width:8px;height:8px;border-radius:50%;background:var(--edge)}
 .feedrow .fdot.live{background:var(--amber)}
 .feedrow .fdot.idle{background:var(--green)}
 .feedrow .fdot.dead{background:var(--red)}
 .feedrow button{appearance:none;border:1px solid var(--edge);
   background:var(--panel-key);color:var(--ivory);cursor:pointer;
-  font:10px var(--mono);letter-spacing:.12em;padding:5px 8px}
+  font:10px var(--mono);letter-spacing:.12em;padding:6px 9px}
 .feedrow button.on{border-color:var(--amber);color:var(--amber)}
 /* edit-talent list */
 .editlist{display:none;width:100%;max-width:920px;flex-direction:column;gap:8px}
@@ -219,13 +232,22 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
         <button id="g-up" aria-label="gain up">+</button>
       </div>
     </div>
-    <div class="field"><label>extern feeds — device channel latched into a comms channel</label>
+    <div class="field wide"><label>extern feeds — device channel latched into a comms channel</label>
       <div id="feedlist"></div>
-      <div class="row">
-        <select id="feedslot" title="talkback channel" style="width:74px;flex:none"></select>
-        <select id="feeddev" title="capture device" style="flex:1;min-width:0"></select>
-        <input id="feedchans" placeholder="ch (3 or 3-4)" style="width:96px;flex:none">
-        <button class="tog" id="feedset">SET</button>
+      <div class="feedform">
+        <label for="feeddev">source</label>
+        <select id="feeddev" title="capture device"></select>
+        <label for="feedchansel">channel</label>
+        <div class="row">
+          <select id="feedchansel" title="device channel" style="flex:1;min-width:0"></select>
+          <input id="feedchans" placeholder="e.g. 3 or 3-4" style="display:none;flex:1;min-width:0">
+        </div>
+        <div class="feedhint" id="feedhint"></div>
+        <label for="feedslot">into</label>
+        <div class="row">
+          <select id="feedslot" title="talkback channel" style="width:132px;flex:none"></select>
+          <button class="tog" id="feedset">SET</button>
+        </div>
       </div>
     </div>
     <div class="field"><label>station</label>
@@ -390,16 +412,46 @@ $('g-up').onclick=()=>act('gain',(S.gain+1));
    server truth (S.feeds); rows are stateless buttons over verbs. */
 for(let i=0;i<16;i++){const o=document.createElement('option');
   o.value=i;o.textContent='CH '+(i+1);$('feedslot').appendChild(o);}
-const feeddevsig={v:''};
+const feeddevsig={v:''},feedchsig={v:''};
+/* Channel picks come from the device's own native count (S.micchans, parallel
+   to S.mics). 0 means the backend would not say -- then the free-text field
+   takes over rather than us inventing a channel map for hardware we cannot
+   see. */
+function devChannels(name){
+  const i=(S.mics||[]).indexOf(name);
+  const n=(S.micchans||[])[i];
+  return (typeof n==='number'&&n>0)?n:0;}
+function renderChanPick(){
+  const dev=$('feeddev').value,n=devChannels(dev),sig=dev+'@'+n;
+  if(sig===feedchsig.v)return;feedchsig.v=sig;
+  const sel=$('feedchansel'),txt=$('feedchans'),hint=$('feedhint');
+  if(!n){sel.style.display='none';txt.style.display='';
+    hint.textContent=dev?'this device reports no channel count — type one':'';
+    return;}
+  sel.style.display='';txt.style.display='none';
+  const keep=sel.value;sel.innerHTML='';
+  const add=(v,t)=>{const o=document.createElement('option');
+    o.value=v;o.textContent=t;sel.appendChild(o);};
+  for(let c=1;c<=n;c++)add(String(c),'ch '+c+' — mono');
+  for(let c=1;c+1<=n;c+=2)add(c+'-'+(c+1),'ch '+c+'-'+(c+1)+' — stereo pair');
+  if([].some.call(sel.options,o=>o.value===keep))sel.value=keep;
+  hint.textContent=n+' channel'+(n===1?'':'s')+' on this device';}
+$('feeddev').onchange=renderChanPick;
+function chanValue(){
+  const sel=$('feedchansel');
+  return sel.style.display==='none'?$('feedchans'):sel;}
 $('feedset').onclick=()=>{
-  const ch=$('feedchans').value.trim();
-  if(!/^\d+(-\d+)?$/.test(ch)){$('feedchans').focus();return;}
+  const el=chanValue(),ch=el.value.trim();
+  if(!/^\d+(-\d+)?$/.test(ch)){el.focus();return;}
   act('feed','set '+$('feedslot').value+' '+$('feeddev').value+':'+ch);};
 function renderFeeds(){
   const devs=(S.mics||[]).join('|');
-  if(devs!==feeddevsig.v){feeddevsig.v=devs;const s=$('feeddev');s.innerHTML='';
+  if(devs!==feeddevsig.v){feeddevsig.v=devs;const s=$('feeddev');
+    const keep=s.value;s.innerHTML='';
     (S.mics||[]).forEach(n=>{const o=document.createElement('option');
-      o.value=n;o.textContent=n;s.appendChild(o);});}
+      o.value=n;o.textContent=n;s.appendChild(o);});
+    if((S.mics||[]).indexOf(keep)>=0)s.value=keep;}
+  renderChanPick();
   const fl=$('feedlist');fl.innerHTML='';
   (S.feeds||[]).forEach(f=>{
     const row=document.createElement('div');row.className='feedrow';
@@ -408,19 +460,30 @@ function renderFeeds(){
     dot.className='fdot '+(!f.ok?'dead':(f.latch&&f.peak>103?'live':'idle'));
     dot.title=!f.ok?'capture device dead'
       :(f.latch?(f.peak>103?'latched · audio flowing':'latched · silent'):'unlatched');
+    /* spec is "<device>:<chans>" -- split at the LAST colon so device names
+       carrying one of their own survive intact. */
+    const cut=f.spec.lastIndexOf(':');
+    const dev=cut<0?f.spec:f.spec.slice(0,cut);
+    const chs=cut<0?'':f.spec.slice(cut+1);
     const sp=document.createElement('span');sp.className='fspec';
-    sp.textContent='CH '+(f.slot+1)+' ← '+f.spec+' '+(f.gain>0?'+':'')+f.gain+'dB';
-    sp.title=sp.textContent;
+    sp.textContent='CH '+(f.slot+1)+' ← '+dev+' ';
+    const ci=document.createElement('i');ci.textContent=chs?'ch '+chs:'';
+    sp.appendChild(ci);
+    sp.title='CH '+(f.slot+1)+' ← '+f.spec;
+    const gv=document.createElement('span');gv.className='fgain';
+    gv.textContent=(f.gain>0?'+':'')+f.gain+' dB';
+    const gd=document.createElement('button');gd.textContent='−';
+    gd.title='feed gain down';
+    gd.onclick=()=>act('feed','gain '+f.slot+' '+(f.gain-1));
+    const gu=document.createElement('button');gu.textContent='+';
+    gu.title='feed gain up';
+    gu.onclick=()=>act('feed','gain '+f.slot+' '+(f.gain+1));
     const lb=document.createElement('button');if(f.latch)lb.className='on';
     lb.textContent='LATCH';
     lb.onclick=()=>act('feed','latch '+f.slot+' '+(f.latch?'off':'on'));
-    const gd=document.createElement('button');gd.textContent='−';
-    gd.onclick=()=>act('feed','gain '+f.slot+' '+(f.gain-1));
-    const gu=document.createElement('button');gu.textContent='+';
-    gu.onclick=()=>act('feed','gain '+f.slot+' '+(f.gain+1));
     const rm=document.createElement('button');rm.textContent='✕';
     rm.title='remove feed';rm.onclick=()=>act('feed','off '+f.slot);
-    row.append(dot,sp,lb,gd,gu,rm);fl.appendChild(row);
+    row.append(dot,sp,gd,gv,gu,lb,rm);fl.appendChild(row);
   });
 }
 let micSig='',outSig='';

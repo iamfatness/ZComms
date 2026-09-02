@@ -386,6 +386,15 @@ to 30% under the operator, decision B) engages only while the voice
 actually carries audio. Feeds are app-lifetime (`FeedBank` in main.cpp),
 persisted in `%APPDATA%\ZComms\feeds.env`, restored at launch; panel
 settings drawer has the picker/LATCH/gain rows and cells show a FEED tag.
+The feeds block spans the whole drawer (`.field.wide`) because it does not
+fit a 260 px auto-fit column -- the first cut truncated device names to
+"Sur" and clipped the channel placeholder. The add-feed form is a labeled
+SOURCE / CHANNEL / INTO stack, and CHANNEL is a real picker built from the
+device's native count: `DeviceInfo::channels` (a per-device
+`ma_context_get_device_info` in `ListDevices`, widest native format wins)
+rides to the panel as `micchans[]`, parallel to `mics[]`. 0 = the backend
+would not say, and then the free-text field takes over rather than the UI
+inventing a channel map. `--list-devices` prints the count too.
 Verbs: `feed set <slot> <device:ch[-ch2]>` / `feed latch <slot> on|off` /
 `feed gain <slot> <db>` / `feed off <slot>` (slots 0-based like every
 other verb). Unlatch drains the ramp-out tail before the slot stops being
