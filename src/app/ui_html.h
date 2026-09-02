@@ -323,11 +323,24 @@ const grid=$('grid');
 let cells=[],cellSig='';
 function cellRows(){
   const rows=[];
+  /* Someone who cannot receive talkback must never appear as a READY cell.
+     The two sources here overlap: a channel contributes a cell for whoever
+     holds it, and the roster contributes an off cell for everyone the SDK
+     says cannot hear us. A person in both -- assigned while on the desktop
+     app, then rejoining on web so IsSupportTalkback flips while the channel
+     keeps their label -- used to render TWICE, once "ready" (a lie, nothing
+     reaches them) and once dead. The channel cell wins, wearing the truth. */
+  const deaf=new Set((S.roster||[]).filter(p=>!p.tb).map(p=>p.name));
+  const shown=new Set();
   (S.channels||[]).forEach((c,i)=>{
-    if(c.listeners>0||c.label||c.keyed||c.latched)
-      rows.push({slot:i,name:c.label||('CH '+(i+1)),group:!c.label});
+    if(!(c.listeners>0||c.label||c.keyed||c.latched))return;
+    if(c.label&&deaf.has(c.label)){
+      rows.push({slot:i,name:c.label,off:true});shown.add(c.label);
+    }else{
+      rows.push({slot:i,name:c.label||('CH '+(i+1)),group:!c.label});}
   });
-  (S.roster||[]).forEach(p=>{if(!p.tb)rows.push({slot:-1,name:p.name,off:true});});
+  (S.roster||[]).forEach(p=>{
+    if(!p.tb&&!shown.has(p.name))rows.push({slot:-1,name:p.name,off:true});});
   return rows;
 }
 function buildGrid(rows){
@@ -363,7 +376,17 @@ function updateGrid(){
   const sig=rows.map(r=>r.slot+':'+r.name+(r.off?'!':'')).join('|');
   if(sig!==cellSig){cellSig=sig;buildGrid(rows);}
   cells.forEach(c=>{
-    if(c.row.off){c.st.textContent='no talkback';return;}
+    if(c.row.off){
+      /* Same dead end EDIT TALENT used to have, in the surface the operator
+         actually watches: "no talkback" alone reads as a fault in ZComms.
+         It is not -- a web-client participant physically cannot receive
+         talkback (IsSupportTalkback false). The 170px cell has room for the
+         cause, not the cure, so the fix rides on the tooltip. */
+      c.st.textContent='no talkback · web';
+      c.el.title=c.row.name+
+        ' is on the Zoom web client, which cannot receive talkback — '+
+        'ask them to rejoin in the desktop app';
+      return;}
     const ch=(S.channels||[])[c.row.slot]||{};
     const reach=ch.reach||null;
     const unreach=reach&&reach.ok.length===0&&reach.dark.length>0;
