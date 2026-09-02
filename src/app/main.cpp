@@ -150,7 +150,8 @@ class FeedBank {
     double gain_db = 0.0;
     bool latch = false;
     bool dev_ok = false;
-    int peak = 0;
+    int peak = 0;      // post-envelope: what reaches the channel (the lamp)
+    int in_peak = 0;   // pre-envelope: what is arriving (the input meter)
   };
 
   // Control/main thread. Returns the ops line describing what happened.
@@ -272,6 +273,7 @@ class FeedBank {
       st.latch = s.cfg.latch;
       st.dev_ok = s.dev_ok && s.dev && s.dev->running();
       st.peak = s.chain->peak();
+      st.in_peak = s.chain->input_peak();
       out.push_back(st);
     }
     return out;
@@ -1960,7 +1962,8 @@ int Run(int argc, char** argv) {
           j += "\"gain\":" + std::to_string(static_cast<int>(fs.gain_db)) + ",";
           j += std::string("\"latch\":") + (fs.latch ? "true," : "false,");
           j += std::string("\"ok\":") + (fs.dev_ok ? "true," : "false,");
-          j += "\"peak\":" + std::to_string(fs.peak) + "}";
+          j += "\"peak\":" + std::to_string(fs.peak) + ",";
+          j += "\"inpeak\":" + std::to_string(fs.in_peak) + "}";
         }
       }
       j += "],";

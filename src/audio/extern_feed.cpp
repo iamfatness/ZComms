@@ -111,6 +111,30 @@ void FeedChain::PushInterleaved(const float* interleaved, int frames,
   gain_.Process(mono_.data(), frames);
   limiter_.Process(mono_.data(), frames);
 
+  // Input meter, measured HERE -- above the latch, above the early return
+  // below. An unlatched chain stops producing entirely, so every downstream
+  // measurement reads zero; metering there would go dark exactly when the
+  // operator is trying to find out whether the cable is live. Decay matches
+  // peak_ so the two instruments behave alike.
+  {
+    int pk = 0;
+    for (int i = 0; i < frames; ++i) {
+      float v = mono_[static_cast<size_t>(i)] * 32767.0f;
+      if (v < 0.0f) v = -v;
+      if (v > 32767.0f) v = 32767.0f;
+      const int a = static_cast<int>(v);
+      if (a > pk) pk = a;
+    }
+    // Decay per 20 ms of audio, not per callback: a device that hands us
+    // 10 ms buffers and one that hands us 100 ms must show the same fall
+    // time, or the meter's ballistics change with the interface.
+    int units = frames / kFrameSamples;
+    if (units < 1) units = 1;
+    int decayed = in_peak_.load();
+    for (int u = 0; u < units; ++u) decayed = decayed * 15 / 16;
+    in_peak_.store(pk > decayed ? pk : decayed);
+  }
+
   // LATCH is this source's envelope: the target comes from the control
   // thread's atomic, the ramp itself runs here, and once fully silent the
   // chain stops producing frames entirely -- the ring drains and the sink
