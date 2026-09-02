@@ -79,16 +79,26 @@ needed since the chirp/matched-filter rework.
 
 Open defects (2026-08-28), still standing:
 
-- **zcomms hang (AppHangB1), two occurrences, STILL UNDIAGNOSED but now
-  INSTRUMENTED.** 2026-08-28: ~40 s after a phase that sent 8 s of audio into
-  an **empty** channel, the main loop stopped pumping and Windows killed the
-  process. 2026-09-02 (v0.1.10, owner's machine): ~4 minutes in with the
-  settings drawer open, same WER class, and the run left NO log because
-  `BindStdio` skipped the file whenever a console was inherited. Neither is
-  reproduced. What changed 2026-09-02: the log is always written and always
-  readable, and BOTH loops (main and the shell window's message pump) are
-  watched by watchdogs that report out-of-band -- see "The diagnostic stream
-  + the two watchdogs". The next occurrence should name itself.
+- ~~zcomms hang (AppHangB1)~~ -- **ROOT-CAUSED AND FIXED 2026-09-02
+  (v0.1.12), with a captured stack.** When stdout is an inherited pipe that
+  NOBODY DRAINS, the app's own status output (~2 KB/s) fills the 64 KB pipe
+  buffer and the next `printf` blocks FOREVER inside the CRT stdout lock. The
+  dump taken from a live reproduction shows thread 0 -- the main thread -- at
+  `ntdll!NtWriteFile` <- `KERNELBASE!WriteFile` <-
+  `ucrtbase!common_flush_and_write_nolock` <- `common_vfprintf` <- zcomms.
+  Any other thread that then printfs blocks on the same FILE lock, the message
+  pump stops, and Windows reports AppHangB1. **Explorer / Start-Menu launches
+  were never affected** -- only launches from a shell or script whose output
+  is not being read, which is exactly how the 2026-09-02 v0.1.10 occurrence
+  was started (`Start-Process` from a tool call) and why it left no log.
+  Fixed by routing console writes through a BOUNDED, DROPPING queue on its own
+  thread (`ConsoleQueue`, cap 256 -- a wedged console costs console output,
+  never the app), which is why that property is now pinned by a
+  mutation-verified test. Regression-tested: installed v0.1.12 under the
+  identical inherited-undrained-pipe conditions stayed responsive for 300 s;
+  v0.1.10 wedged at 165 s. The 2026-08-28 occurrence (~40 s after 8 s of audio
+  into an empty channel) is CONSISTENT with the same mechanism -- that harness
+  also ran under a console -- but was never captured, so it is not proven.
 - ~~zcomms-tap Goertzel fragility~~ — fixed 2026-08-28: chirp probe +
   matched-filter/PSR detection; field-proven both directions on a noisy bus.
 
@@ -148,8 +158,10 @@ truth by construction, so that is the only place the instrument gets checked.
 v0.1.10 wedged on the owner's machine ~4 minutes in, settings drawer open.
 WER logged **AppHangB1** -- "zcomms.exe stopped interacting with Windows and
 was closed" -- which is a HANG, not a fault, so the v0.1.7 crash trap could
-not fire. The investigation then hit two defects that made the incident
-unknowable, and both are now fixed in `src/app/diag_log.{h,cpp}`:
+not fire. (The hang itself was root-caused later the same day and fixed in
+v0.1.12 -- see the open-defects list above; the console sink was the cause,
+not merely the blind spot.) The investigation first hit two defects that made
+the incident unknowable, and both are now fixed in `src/app/diag_log.{h,cpp}`:
 
 1. **A console-launched run wrote no log at all.** `BindStdio()` returned
    early whenever `STD_OUTPUT_HANDLE` was valid, so a run started from a
