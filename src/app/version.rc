@@ -8,8 +8,8 @@
 1 ICON "zcomms.ico"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,1,13,0
- PRODUCTVERSION 0,1,13,0
+ FILEVERSION 0,1,14,0
+ PRODUCTVERSION 0,1,14,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -22,11 +22,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "ZComms"
             VALUE "FileDescription", "ZComms Talkback Panel"
-            VALUE "FileVersion", "0.1.13.0"
+            VALUE "FileVersion", "0.1.14.0"
             VALUE "InternalName", "zcomms"
             VALUE "OriginalFilename", "zcomms.exe"
             VALUE "ProductName", "ZComms"
-            VALUE "ProductVersion", "0.1.13"
+            VALUE "ProductVersion", "0.1.14"
         END
     END
     BLOCK "VarFileInfo"
