@@ -172,6 +172,37 @@ unknowable, and both are now fixed in `src/app/diag_log.{h,cpp}`:
    the same counters into the log once a minute. Parts cap at 8 MB (4 parts,
    cycled and truncated on reuse) and the directory keeps the last 10 runs.
 
+**The drop-not-block property is now a TEST, not a reading of the code
+(2026-09-02).** The console hand-off is `src/app/console_queue.h`
+(`ConsoleQueue`, cap 256, drops the ARRIVING line and counts it) and the size
+policy is `src/app/log_parts.h` (`LogParts`), both pinned in
+`tests/app/test_diag.cpp`. The queue owns its own mutex and condition variable,
+unlike this repo's other extracted units -- "a push returns while the consumer
+never will" is a property OF the synchronisation, so the test has to drive the
+same code the app runs. The key case wedges a consumer thread inside one
+"write" forever and asserts 100k pushes still return (bounded by a 5 s future
+wait, so a reintroduced blocking enqueue FAILS the suite instead of hanging
+it -- verified by temporarily making Push wait for space: the run wedged).
+Drops now also say so in the FILE (`[diag] console wedged: dropped N ...`,
+throttled to 1/s); `console_dropped` was counted into a field nobody read.
+
+Two things that were asserted and are now shown:
+
+- **The rotation WRAP is proven end-to-end.** Driven with `kMaxPartBytes`
+  temporarily at 60 bytes: parts 0->1->2->3->0->1, part 3's note reads
+  "continuing in part 0", and reopened part 0 held only the LATE lines --
+  CREATE_ALWAYS truncates on reuse, as designed. It also exposed a real
+  cosmetic bug: the note said "continuing in part 4", a file that never
+  exists. Fixed (`LogParts::next_part()`), pinned.
+- **The `[heartbeat]` line was meeting-session-only.** It lives in the session
+  loop, so an idle app -- the join card, where it sits whenever it is not in a
+  meeting and where v0.1.10 hung with the drawer open -- wrote NOTHING after
+  startup (the owner's 5-minute idle run: a 510-byte log whose last write never
+  moved). "Nothing was written" and "the process wedged at startup" looked
+  identical in the file. The join-card loop now beats too
+  (`[heartbeat] join card  signed_in N  feeds N`, 1/min, verified over a
+  140 s idle run: three lines, 60 s apart).
+
 Instruments, both proven with `--selftest-hang <ui|main> <seconds>` (hidden,
 the sibling of `--selftest-crash` -- an instrument nobody has watched work is
 a guess, and v0.1.10 shipped a watchdog that had never fired):

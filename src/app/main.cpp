@@ -1031,6 +1031,16 @@ int Run(int argc, char** argv) {
   int64_t selftest_at_ns =
       cfg.selftest_hang.empty() ? 0 : NowNs() + 5'000'000'000LL;
 
+  // The liveness trail has to cover the join card, for the same reason the
+  // main-loop watchdog became app-lifetime: this is where the app sits
+  // whenever it is not in a meeting, drawer fully usable, and it is where
+  // v0.1.10 was when it hung. The session loop's [heartbeat] line does not
+  // reach here -- a 5-minute idle run of v0.1.11 left a 510-byte log whose
+  // last write never moved past startup, which is indistinguishable from a
+  // process that wedged during startup. One line a minute makes those two
+  // different in the file.
+  int64_t next_idle_beat_ns = 0;
+
   // --- Session cycle --------------------------------------------------------
   // The app outlives its meetings. Acquire one, run it, and on any outcome
   // short of "quit" -- join failure, SDK conflict, meeting over -- come back
@@ -1043,6 +1053,11 @@ int Run(int argc, char** argv) {
   for (;;) {
     heartbeat_ns.store(NowNs());
     SetMainPhase("join card");
+    if (NowNs() >= next_idle_beat_ns) {
+      next_idle_beat_ns = NowNs() + 60'000'000'000LL;
+      std::printf("[heartbeat] join card  signed_in %d  feeds %zu\n",
+                  signed_in.load() ? 1 : 0, feeds.Snapshot().size());
+    }
     if (selftest_at_ns != 0 && NowNs() >= selftest_at_ns) {
       selftest_at_ns = 0;
       if (cfg.selftest_hang == "main") {
