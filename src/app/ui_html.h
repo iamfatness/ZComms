@@ -323,11 +323,24 @@ const grid=$('grid');
 let cells=[],cellSig='';
 function cellRows(){
   const rows=[];
+  /* Someone who cannot receive talkback must never appear as a READY cell.
+     The two sources here overlap: a channel contributes a cell for whoever
+     holds it, and the roster contributes an off cell for everyone the SDK
+     says cannot hear us. A person in both -- assigned while on the desktop
+     app, then rejoining on web so IsSupportTalkback flips while the channel
+     keeps their label -- used to render TWICE, once "ready" (a lie, nothing
+     reaches them) and once dead. The channel cell wins, wearing the truth. */
+  const deaf=new Set((S.roster||[]).filter(p=>!p.tb).map(p=>p.name));
+  const shown=new Set();
   (S.channels||[]).forEach((c,i)=>{
-    if(c.listeners>0||c.label||c.keyed||c.latched)
-      rows.push({slot:i,name:c.label||('CH '+(i+1)),group:!c.label});
+    if(!(c.listeners>0||c.label||c.keyed||c.latched))return;
+    if(c.label&&deaf.has(c.label)){
+      rows.push({slot:i,name:c.label,off:true});shown.add(c.label);
+    }else{
+      rows.push({slot:i,name:c.label||('CH '+(i+1)),group:!c.label});}
   });
-  (S.roster||[]).forEach(p=>{if(!p.tb)rows.push({slot:-1,name:p.name,off:true});});
+  (S.roster||[]).forEach(p=>{
+    if(!p.tb&&!shown.has(p.name))rows.push({slot:-1,name:p.name,off:true});});
   return rows;
 }
 function buildGrid(rows){
@@ -363,7 +376,17 @@ function updateGrid(){
   const sig=rows.map(r=>r.slot+':'+r.name+(r.off?'!':'')).join('|');
   if(sig!==cellSig){cellSig=sig;buildGrid(rows);}
   cells.forEach(c=>{
-    if(c.row.off){c.st.textContent='no talkback';return;}
+    if(c.row.off){
+      /* Same dead end EDIT TALENT used to have, in the surface the operator
+         actually watches: "no talkback" alone reads as a fault in ZComms.
+         It is not -- a web-client participant physically cannot receive
+         talkback (IsSupportTalkback false). The 170px cell has room for the
+         cause, not the cure, so the fix rides on the tooltip. */
+      c.st.textContent='no talkback · web';
+      c.el.title=c.row.name+
+        ' is on the Zoom web client, which cannot receive talkback — '+
+        'ask them to rejoin in the desktop app';
+      return;}
     const ch=(S.channels||[])[c.row.slot]||{};
     const reach=ch.reach||null;
     const unreach=reach&&reach.ok.length===0&&reach.dark.length>0;
@@ -501,34 +524,36 @@ $('feedset').onclick=()=>{
   const el=chanValue(),ch=el.value.trim();
   if(!/^\d+(-\d+)?$/.test(ch)){el.focus();return;}
   act('feed','set '+$('feedslot').value+' '+$('feeddev').value+':'+ch);};
-function renderFeeds(){
-  const devs=(S.mics||[]).join('|');
-  if(devs!==feeddevsig.v){feeddevsig.v=devs;const s=$('feeddev');
-    const keep=s.value;s.innerHTML='';
-    (S.mics||[]).forEach(n=>{const o=document.createElement('option');
-      o.value=n;o.textContent=n;s.appendChild(o);});
-    if((S.mics||[]).indexOf(keep)>=0)s.value=keep;}
-  renderChanPick();renderSlotPick();
-  const fl=$('feedlist');fl.innerHTML='';
-  (S.feeds||[]).forEach(f=>{
+/* Feed rows are REBUILT only when their structure changes, and updated in
+   place otherwise. The old code did fl.innerHTML='' on every state frame --
+   ten times a second -- which destroyed and recreated every button under the
+   operator's finger. A click needs mousedown and mouseup on the SAME element;
+   a human click takes 80-150 ms, so the row was replaced mid-press and the
+   click was never synthesised. LATCH, the gain keys and the remove key all
+   silently did nothing. The desk grid never had this bug because buildGrid()
+   is already signature-gated -- this is that pattern, applied here.
+   Handlers read S at click time, so a live row never holds a stale feed. */
+let feedEls=[];
+const feedsig={v:''};
+function feedNow(slot){return (S.feeds||[]).find(f=>f.slot===slot)||null;}
+function buildFeedRows(feeds){
+  const fl=$('feedlist');fl.innerHTML='';feedEls=[];
+  feeds.forEach(f=>{
+    const slot=f.slot;
     const row=document.createElement('div');row.className='feedrow';
     const dot=document.createElement('i');
-    /* 103 ~ -50 dBFS: the same threshold the duck's signal gate uses */
-    dot.className='fdot '+(!f.ok?'dead':(f.latch&&f.peak>103?'live':'idle'));
-    dot.title=!f.ok?'capture device dead'
-      :(f.latch?(f.peak>103?'latched · audio flowing':'latched · silent'):'unlatched');
     /* spec is "<device>:<chans>" -- split at the LAST colon so device names
        carrying one of their own survive intact. */
     const cut=f.spec.lastIndexOf(':');
     const dev=cut<0?f.spec:f.spec.slice(0,cut);
     const chs=cut<0?'':f.spec.slice(cut+1);
     /* Lead with who hears this feed, not the slot it lands on. */
-    const w=slotWho(f.slot);
+    const w=slotWho(slot);
     const who=document.createElement('span');
     who.className='fwho'+(w.spare?' spare':'');
-    who.textContent=w.spare?('ch '+(f.slot+1)+' — nobody yet'):w.name;
+    who.textContent=w.spare?('ch '+(slot+1)+' — nobody yet'):w.name;
     const wn=document.createElement('i');
-    wn.textContent=w.spare?'':(' · ch '+(f.slot+1));
+    wn.textContent=w.spare?'':(' · ch '+(slot+1));
     who.appendChild(wn);
     who.title=who.textContent;
     const sp=document.createElement('span');sp.className='fsrc';
@@ -538,20 +563,48 @@ function renderFeeds(){
     sp.appendChild(ci);
     sp.title='← '+f.spec;
     const gv=document.createElement('span');gv.className='fgain';
-    gv.textContent=(f.gain>0?'+':'')+f.gain+' dB';
     const gd=document.createElement('button');gd.textContent='−';
     gd.title='feed gain down';
-    gd.onclick=()=>act('feed','gain '+f.slot+' '+(f.gain-1));
+    gd.onclick=()=>{const c=feedNow(slot);
+      if(c)act('feed','gain '+slot+' '+(c.gain-1));};
     const gu=document.createElement('button');gu.textContent='+';
     gu.title='feed gain up';
-    gu.onclick=()=>act('feed','gain '+f.slot+' '+(f.gain+1));
-    const lb=document.createElement('button');if(f.latch)lb.className='on';
-    lb.textContent='LATCH';
-    lb.onclick=()=>act('feed','latch '+f.slot+' '+(f.latch?'off':'on'));
+    gu.onclick=()=>{const c=feedNow(slot);
+      if(c)act('feed','gain '+slot+' '+(c.gain+1));};
+    const lb=document.createElement('button');lb.textContent='LATCH';
+    lb.onclick=()=>{const c=feedNow(slot);
+      if(c)act('feed','latch '+slot+' '+(c.latch?'off':'on'));};
     const rm=document.createElement('button');rm.textContent='✕';
-    rm.title='remove feed';rm.onclick=()=>act('feed','off '+f.slot);
+    rm.title='remove feed';rm.onclick=()=>act('feed','off '+slot);
     row.append(dot,who,sp,gd,gv,gu,lb,rm);fl.appendChild(row);
+    feedEls.push({slot:slot,dot:dot,gain:gv,latch:lb});
   });
+}
+function updateFeedRows(feeds){
+  feedEls.forEach(e=>{
+    const f=feeds.find(x=>x.slot===e.slot);if(!f)return;
+    /* 103 ~ -50 dBFS: the same threshold the duck's signal gate uses */
+    e.dot.className='fdot '+(!f.ok?'dead':(f.latch&&f.peak>103?'live':'idle'));
+    e.dot.title=!f.ok?'capture device dead'
+      :(f.latch?(f.peak>103?'latched · audio flowing':'latched · silent'):'unlatched');
+    e.gain.textContent=(f.gain>0?'+':'')+f.gain+' dB';
+    e.latch.classList.toggle('on',!!f.latch);
+  });
+}
+function renderFeeds(){
+  const devs=(S.mics||[]).join('|');
+  if(devs!==feeddevsig.v){feeddevsig.v=devs;const s=$('feeddev');
+    const keep=s.value;s.innerHTML='';
+    (S.mics||[]).forEach(n=>{const o=document.createElement('option');
+      o.value=n;o.textContent=n;s.appendChild(o);});
+    if((S.mics||[]).indexOf(keep)>=0)s.value=keep;}
+  renderChanPick();renderSlotPick();
+  const feeds=S.feeds||[];
+  /* Structure only: peak and gain and latch move constantly and are applied
+     in place, so they must NOT force a rebuild. */
+  const sig=feeds.map(f=>f.slot+'|'+f.spec+'|'+slotWho(f.slot).name).join('~');
+  if(sig!==feedsig.v){feedsig.v=sig;buildFeedRows(feeds);}
+  updateFeedRows(feeds);
 }
 let micSig='',outSig='';
 function fillSel(sel,list,current,sig,verb){
@@ -564,6 +617,7 @@ function fillSel(sel,list,current,sig,verb){
   sig.v=s;return sig;
 }
 const micsig={v:''},outsig={v:''},roomsig={v:''};
+const editsig={v:''};
 
 /* join / sign-in */
 const needPass=()=>S.phase==='joining'&&/PASSCODE/.test(S.status||'');
@@ -637,7 +691,18 @@ function render(){
   }
   /* edit-talent list */
   if(editMode){
-    const r=$('editlist');r.innerHTML='';
+    const r=$('editlist');
+    /* Signature-gated for the same reason the feed rows are: this list was
+       rebuilt on every state frame, so a chip was destroyed under the
+       operator's finger between mousedown and mouseup and the click was
+       never synthesised. Nothing here changes faster than an assignment
+       does, so gating the whole rebuild is enough -- no in-place pass. */
+    const esig=(S.roster||[]).map(p=>p.uid+':'+p.name+':'+(p.tb?1:0)+':'+
+        (p.chans||[]).map(x=>x?1:0).join('')).join('~')+'#'+
+      chans.map(c=>c.label||'').join('~');
+    if(esig!==editsig.v){
+    editsig.v=esig;
+    r.innerHTML='';
     // Who is on each channel, from the same server truth the chips toggle
     // (roster.chans = confirmed membership OR pending intent), so a chip
     // lights on the next state frame rather than waiting for Zoom's async
@@ -694,7 +759,8 @@ function render(){
       r.appendChild(li);
     });
     if(!(S.roster||[]).length){r.innerHTML='<li>no one yet</li>';}
-  }
+    }
+  }else{editsig.v='';}
   /* settings */
   $('side').classList.toggle('on',!!S.sidetone);
   $('aec').classList.toggle('on',!!S.aec);
