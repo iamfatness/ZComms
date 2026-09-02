@@ -1,12 +1,13 @@
 # ZComms — standalone intercom on the Zoom Meeting SDK
 
-> **Status 2026-08-30: largely executed — v0.1.0 is shipped**
+> **Status 2026-09-02: Phase 1 is shipped — v0.1.14 is the current release**
 > (installer on GitHub Releases). This document is kept for the reasoning;
-> the living state (architecture as built, invariants, and the live-found
-> platform laws: mic-open delivery, breakout-room scope, per-call rate
-> limits, same-account collisions, auth-tier entitlements) is in the repo's
-> `CLAUDE.md`. Still open from §here: code signing, ZComms' own Marketplace
-> identity, Spikes B–D remainders, macOS.
+> the living state — architecture as built, invariants, and the live-found
+> platform laws — is in the repo's `CLAUDE.md`, which is the source of truth
+> when the two disagree. Phase 1 status is marked through §8. Still
+> open: code signing, ZComms' own Marketplace identity, Spikes B–D
+> remainders, Phase 2 (party lines and the admin portal, none of §7
+> is built), macOS.
 
 Status: **design, post-Spike-A.** Written 2026-08-25; reworked 2026-08-26
 after Spike A ran against a live meeting and its result reshaped the
@@ -187,8 +188,11 @@ built as the seed rather than as throwaway:
   remains unbuilt.
 - ~~The audio engine~~ — capture, gain, look-ahead limiter, PTT ramps, the
   paced TX thread and its clock: built, unit-tested, verified on hardware.
-- OAuth sign-in and token storage.
-- The app shell, the control surface, packaging, code signing, an updater.
+- ~~OAuth sign-in and token storage~~ — built: browser PKCE through the
+  CoreVideo broker, ZAK joins, DPAPI at rest.
+- ~~The app shell, the control surface, packaging~~ — built: a WebView2
+  panel in a Windows-subsystem exe, an HTTP/SSE control surface, a per-user
+  NSIS installer. **Code signing and an updater remain.**
 
 What remains is weeks, not the original weeks-more. §8 reflects the new
 sizing.
@@ -381,6 +385,12 @@ things bite anyone writing one: dropdown choices are baked in when actions are
 built, so a channel-roster change must rebuild the action definitions rather
 than only pushing variables; and channels must be keyed by a stable id (§5).
 
+**Built (v0.1.x).** The control surface is HTTP on `127.0.0.1:7350`: an SSE
+state stream and a one-line `POST /act` action API, with the panel itself as
+its first consumer. Verbs today are `talk`, `latch`, `talkall`, `latchall`,
+`assign`, `feed set|latch|gain|off`, `cue`, `notify`, `bo`, `room`, `join`,
+`passcode`, `signin`, `signout`, `quit`. The Companion module is not written.
+
 ### 6.5 Process model
 
 Phases 1 and 2 are one process and need nothing here (§3.2). If multi-meeting
@@ -394,6 +404,11 @@ binary so that another product's cleanup could mistake it for one of its own
 not be able to coexist at all until Spike C says otherwise.
 
 ## 7. Admin portal and the group model
+
+**NOT BUILT — none of this section exists in the product.** It is Phase 2,
+and it is here as the design to build against, not as a description of
+anything that runs today. The panel's routing today is one operator against
+a live roster, resolved in-process and forgotten when the meeting ends.
 
 The routing matrix is the product. Everything else is plumbing.
 
@@ -447,42 +462,57 @@ resolved matrix and keeps working through a backend outage.
 
 ## 8. Phasing
 
-Re-sized after Spike A. Two things moved the estimates down: the
-worker-per-channel process model is gone (§3.2), and the audio engine —
-capture, gain, limiter, PTT ramps, pacing, the TX seam — is already built and
-verified on hardware (`src/audio`), as is the SDK join/auth/talkback layer the
-spike harness proved out.
+**Phase 0 — Spikes. Spike A DONE and passed.** B overtaken by production
+use, C and D still open (§9). Neither blocks shipping; both are things that
+should be known before a customer finds them.
 
-**Phase 0 — Spikes (§9).** Spike A is done and passed. B is half-answered, C
-re-scoped, D unchanged. Remaining: days, not weeks.
+**Phase 1 — The talkback panel. SHIPPED.** v0.1.0 through v0.1.14, all
+installers on GitHub Releases. What this phase promised and now exists:
 
-**Phase 1 — The talkback panel.** ~6–9 weeks.
-One process, the client's meeting, up to 16 channels: PTT and latch per
-channel, channel setup from the participant list, monitor mix, AEC, device
-selection, sign-in, packaging and signing. Ships as "the director talks to
-any subset of panelists privately" — already a product no plain Zoom setup
-offers, and most of what remains is shell, not media: the engine and the SDK
-layer exist.
+- One process, the client's meeting, the whole 16-channel bank provisioned
+  in one request; PTT and latch per person, ALL CALL, latch-all.
+- Channel setup from the participant list — every capable participant
+  auto-assigned their own channel, EDIT TALENT to move anyone anywhere.
+- The audio chain: gain, look-ahead limiter, ramped PTT envelope, AEC,
+  sidetone, test tone, live device switching.
+- Sign-in: Zoom OAuth through the broker, ZAK joins, DPAPI token storage.
+  No anonymous joins (`--anon` remains for scripted runs only).
+- Packaging: per-user NSIS installer, no UAC, Zoom SDK inside, WebView2
+  shell, app icon and dark chrome, QUICKSTART shipped alongside.
+- Beyond the original scope, because live meetings demanded it: breakout
+  awareness, chat signaling, a crash trap, an always-written readable log
+  with two watchdogs, and extern feeds (v0.1.9–v0.1.14).
 
-**Phase 2 — Matrix + admin.** ~8–12 weeks.
-The routing matrix over channel membership, groups, presets pushed live,
-admin portal, presence, audit log, control surface / Companion module. First
-releasable *intercom*. (Multi-meeting workers appear here only if a customer
-needs two shows at once — otherwise not at all.)
+Still owed from this phase: **code signing** (needs a Microsoft developer
+account — until then SmartScreen warns every new user), **ZComms' own Zoom
+Marketplace identity** (§3.6, a review cycle with lead time), an updater, and
+the live gates listed in `CLAUDE.md` that separate "built" from "proven in
+front of an audience".
 
-**Phase 3 — Native fabric.** ~12+ weeks.
+**Phase 2 — Matrix, party lines, admin. NOT STARTED.** ~8–12 weeks.
+Nothing in §7 is built: no orgs, users, groups, presets, presence, or audit
+log, and no backend at all. The panel today resolves a matrix of one
+operator against a live roster, held in the process. What the shared
+roadmap with CoreVideo adds ahead of the portal: **named party-line
+channels with multiple members**, and **per-person private channels becoming
+opt-in rather than automatic** (they cost channel budget out of a hard 16).
+The two SDK unknowns at the end of §9 gate both. A Bitfocus Companion module
+is the cheapest route to Stream Deck support and the control surface it
+would drive already exists (§6.4).
+
+**Phase 3 — Native fabric. NOT STARTED.** ~12+ weeks.
 Own low-latency transport (Opus over a self-hosted SFU) for wire-class
 crew-to-crew — 165 ms is fine for IFB and cueing, not for a camera operator
-tracking a director — with the Zoom talkback leg as one endpoint on it. This
-is where the Unity comparison becomes fair.
+tracking a director — with the Zoom talkback leg as one endpoint on it.
+This is where the Unity comparison becomes fair.
 
 The go-to-market wedge stays what §1 argues: crews already running remote
 guests over Zoom, for whom a native Zoom leg is the thing no incumbent
 intercom offers.
 
-## 9. Spikes — status after the live run of 2026-08-26
+## 9. Spikes — status
 
-**Spike A — TX latency. DONE, PASSED.**
+**Spike A — TX latency. DONE, PASSED (2026-08-26).**
 Measured over the talkback transport into a real meeting, observed at a plain
 Zoom client on the same machine, one clock end to end, emission timestamped
 at the actual send call, arrival recovered by matched-filter correlation with
@@ -499,46 +529,65 @@ kill criterion — the Zoom-transport thesis survives.* The harness lives at
 Not measured: the virtual-mic path, whose send window never opened under
 public-app-key auth. No latency figure exists for it; do not quote one.
 
-**Spike B — Mute policy and identity. Half-answered in passing.**
-Answered: co-host role gates channel creation; a guest SDK client lands in
-the waiting room like anyone else; "ask to unmute" is a consent request the
-client must accept; the client appears in the participant list under its
-display name ("ZComms Spike A" did). Open: behaviour under "mute all" and
-"participants cannot unmute" *while a channel is live*, whether co-host
-demotion mid-show destroys channels, and whether the participant-list
-presentation is acceptable in front of a client's audience.
+**Spike B — Mute policy and identity. Overtaken by production use, not
+formally closed.**
+Answered here: co-host role gates channel creation; a guest SDK client lands
+in the waiting room like anyone else; "ask to unmute" is a consent request
+the client must accept; the client appears in the participant list under its
+display name. Answered since, the expensive way, in live meetings — these
+are now the delivery laws in `CLAUDE.md`, not spike questions: talkback
+delivers only while this client's meeting audio is open; it does not cross
+breakout rooms; a same-account host collision hangs the join; Zoom ducks
+channel members by default; `SendAudioDataToChannel` is mono only. Still
+open: behaviour under "mute all" / "participants cannot unmute" *while a
+channel is live*, and whether co-host demotion mid-show destroys channels.
 
-**Spike C — SDK exclusivity. Re-scoped, 1 day.**
-The per-channel cost question is gone with the worker model. What remains is
-sharper and already half-observed: `InitSDK` fails with
-`SDKERR_OTHER_SDK_INSTANCE_RUNNING` while *another application's* SDK engine
-runs — machine-wide, not per-process. Confirm the boundary (two ZComms
-processes; ZComms beside another SDK app; whether `sdkPathPostfix` isolates
-data paths and changes the answer).
-*Kill criterion, updated: if the SDK is genuinely one-instance-per-machine
+**Spike C — SDK exclusivity. Still open, 1 day.**
+`InitSDK` fails with `SDKERR_OTHER_SDK_INSTANCE_RUNNING` while *another
+application's* SDK engine runs — machine-wide, not per-process. The product
+already treats this as fact: `SdkConflictHint()` names the offending process
+by scanning for known SDK hosts, because the raw error reads as a broken
+install. What is still unconfirmed is the boundary (two ZComms processes;
+ZComms beside another SDK app; whether `sdkPathPostfix` isolates data paths
+and changes the answer).
+*Kill criterion, unchanged: if the SDK is genuinely one-instance-per-machine
 with no isolation escape, ZComms cannot run alongside any other Meeting SDK
-product on an operator's machine — a compatibility fact that must be known
-before it is discovered by a customer.*
+product on an operator's machine — including CoreVideo, on the same
+operator's rig. That must be known before a customer discovers it.*
 
-**Spike D — Zoom ISV conversation. Calendar time, not engineering time.**
-The shape changed: the core product is now **one SDK session per operator**,
-not per channel — a friendlier licensing story. The questions for Zoom:
-talkback API entitlement across account tiers (it worked on an ordinary
-account; is that stable policy?), the `ZComms` name (§3.7), and the
+**Spike D — Zoom ISV conversation. Still open. Calendar time, not
+engineering time.**
+The core product is **one SDK session per operator**, not per channel — a
+friendlier licensing story. The questions for Zoom: talkback API entitlement
+across account tiers (it has worked on ordinary accounts through every live
+session so far; is that stable policy?), the `ZComms` name (§3.7), and the
 multi-meeting case's session math for Phase 3.
+
+**Two SDK unknowns neither this project nor CoreVideo has probed**, and both
+gate the party-line work in Phase 2:
+
+1. Can one user be a member of two channels simultaneously? Needed for a
+   party line overlapping a private. Probe: invite one uid into two
+   channels, watch both join callbacks, key each, verify delivery.
+2. What does the invitee's stock Zoom client *display* on channel invite or
+   membership? Audit from the receiving side. If Zoom itself shows a banner,
+   that bounds how quiet bring-up can ever be, whatever we do about chat.
 
 ## 10. Risks
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
 | ~~Zoom latency unfixable~~ | *Retired: measured 165/194 ms, inside the bar* | Spike A result, 2026-08-26 |
-| **Talkback API entitlement is undocumented policy** | The core transport worked on one ordinary account; Zoom could gate it by tier or change it — it is the API behind a paid product (ZoomISO) | Spike D asks Zoom directly, before Phase 1 ships on it |
-| **Channel capacity (16 × 10)** | An all-hands page to >10 people cannot be one channel | Matrix packs and refuses honestly (§7.2); virtual mic / fabric for all-hands |
-| **Co-host dependency** | ZComms must be promoted in every client meeting; a host demotion mid-show may kill channels | Surface loudly; Spike B closes the demotion question; document the runbook |
-| SDK is one-instance-per-machine | ZComms cannot run beside other SDK apps (incl. CoreVideo) on one machine | Spike C confirms the boundary and the `sdkPathPostfix` escape |
-| Virtual-mic path needs JWT-auth | Party-line case blocked under PKCE | Accept the demotion; revisit auth only when that case is scheduled |
-| No AEC on raw TX | Operator's monitor echoes into the channel | Headset mandate + device detection, or bundle an AEC |
-| Endpoint rendering surprise | Talkback renders to the comms endpoint, not the named speaker | Support docs; verify-by-signal in device setup UX |
-| Marketplace review slips | Phase 1 built, cannot ship | Start the app identity before Phase 1 code |
+| ~~No AEC on raw TX~~ | *Retired: speexdsp MDF carried in-process, 40.6 dB ERLE unit-proven, on by default* | src/audio/aec |
+| ~~Endpoint rendering surprise~~ | *Retired as a surprise: it is now documented operator-facing in README and QUICKSTART* | Support docs shipped |
+| **Talkback API entitlement is undocumented policy** | The core transport worked on ordinary accounts across many live sessions; Zoom could gate it by tier or change it — it is the API behind a paid product (ZoomISO) | Spike D asks Zoom directly |
+| **The app is unsigned** | SmartScreen warns every new user on first run; a locked-down machine may refuse it outright | Microsoft developer account, then sign in release.ps1 |
+| **The undiagnosed hang** | Two AppHangB1 occurrences, neither reproduced; a mid-show wedge is a show-stopper | Not fixed — made diagnosable (always-written readable log, main-loop and UI-thread watchdogs, bounded quit). The next occurrence names itself |
+| **Extern feeds unproven in a meeting** | The v0.1.9–v0.1.14 feature set is unit-proven and bench-proven, not audience-proven | The M0 gate list in CLAUDE.md: audible to members, latched-silent leaves unity, barge duck, long soak |
+| **Channel capacity (16 × 10)** | An all-hands page to more than 10 people cannot be one channel | Provision the whole bank once and pack honestly; virtual mic / fabric for all-hands |
+| **Co-host dependency** | ZComms must be promoted in every client meeting; a host demotion mid-show may kill channels | Surfaced loudly and retried; Spike B still owns the demotion question |
+| SDK is one-instance-per-machine | ZComms cannot run beside other SDK apps (incl. CoreVideo) on one machine | Detected and named by SdkConflictHint; Spike C confirms the boundary and the sdkPathPostfix escape |
+| Virtual-mic path needs JWT-auth | Party-line case blocked under bare public-app-key | Retired for the auto-suppress case: the broker-JWT tier DOES carry the entitlement, live-verified 2026-08-29. Still open for a real party-line send |
+| Marketplace review slips | Built, cannot ship under its own identity | Start the app identity now |
 | `ZComms` name rejected at review | Rebrand after build | Raise the name in the Spike D conversation |
-| Unity's moat is trust, not features | Slow enterprise adoption | Lead with the Zoom leg; sell to crews already on Zoom |
+| Unity's moat is trust, not features | Slow adoption | Lead with the Zoom leg; sell to crews already on Zoom |

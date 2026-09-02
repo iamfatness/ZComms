@@ -1,58 +1,114 @@
 # ZComms — Quickstart
 
-ZComms is a talkback station for Zoom: it joins the meeting as you, gives
-every panelist their own named talk key, and lets you speak to one person,
-a group, or everyone — without the audience, the recording, or the room
+A talkback station for Zoom. It joins the meeting as you, gives every
+panelist their own named talk key, and lets you speak to one person, a
+group, or everyone — without the audience, the recording, or the room
 hearing a word.
 
-## First run
+This file ships with the app, so it works with no internet. Version 0.1.14.
 
-1. **Install and start ZComms** (Start menu → ZComms). Windows SmartScreen
-   warns because the build is not yet code-signed — "More info → Run anyway".
-2. **SIGN IN WITH ZOOM** — your browser opens for a one-time approval.
-   ZComms joins meetings as your Zoom account from then on.
-3. **Paste a meeting link or ID** into the JOIN card and hit CONNECT.
-4. In the meeting, make **"ZComms" host or co-host** (Participants → More).
-   It needs that role to create channels — it keeps retrying while you do —
-   and as host it also admits your panelists from the waiting room.
+## 1. Get in
 
-## The desk
+1. **Start ZComms** (Start menu). The build is not code-signed yet, so
+   SmartScreen warns on first run: "More info" then "Run anyway".
+2. **SIGN IN WITH ZOOM.** Your browser opens for a one-time approval.
+   ZComms joins meetings as your Zoom account from then on. There is no
+   anonymous mode.
+3. **Paste a meeting link or ID** into the JOIN card and press CONNECT.
+   If the meeting has a passcode and it is not in the link, the same card
+   asks for it.
+4. In the meeting, make **"ZComms" host or co-host** (Participants, More).
+   Zoom will not let it create talkback channels without that role. It
+   keeps retrying while you do it, and as host it also admits your
+   panelists from the waiting room.
 
-- Every panelist lands on **their own channel** — their key wears their
-  name. **Hold a key to talk** to that person alone; digits 1–9 work too.
-- **ALL CALL** (or SPACE while the panel is focused) talks to everyone.
-- **LATCH** mode makes presses stick — press again to release.
-- **EDIT TALENT** shows the channel chips for building groups.
-- **SETTINGS** holds the microphone and sidetone pickers, gain, echo
-  cancel, and a test tone that runs through the whole transmit chain.
+Wait for the rail lamps: **LINK** (in the meeting) and **CHANNEL**
+(channels up). **MTG MIC** must be lit too — Zoom only delivers talkback
+while ZComms' own meeting audio is open, so the app holds it open and
+feeds it silence. Nobody in the room hears you through it.
 
-A key's color is the truth: **red = someone is hearing you**, amber =
-keyed but nobody is in the channel yet, dark with `in <room>` = that
-person is in another breakout room, where talkback cannot reach (move the
-station there: SETTINGS → STATION ROOM).
+## 2. Get talking
 
-The rail lamps: **LINK** (in the meeting), **MTG MIC** (meeting audio open
-— required for talkback delivery; ZComms keeps it open and auto-suppressed
-so the room hears silence), **CHANNEL** (channels up), **TX** (on air).
+Every panelist who can receive talkback lands on their own channel, so
+each key wears their name.
 
-## Things worth knowing
+- **Hold a cell** to talk to that person alone.
+- **Digits 1–9** key the first nine cells directly.
+- **SPACE**, or the **ALL CALL** bar, talks to everyone at once.
+- **LATCH** turns presses into toggles: press to open, press again to
+  close. Pressing ALL CALL in latch mode latches everyone.
+- **EDIT TALENT** lists everybody with all sixteen channel chips. Click a
+  chip to put that person on that channel, or take them off. A channel
+  someone else is already on is marked busy but still works — a channel
+  holds ten. That is how you build a group line.
 
-- **Panelists must be on the Zoom desktop or mobile app.** The web client
-  cannot receive talkback — such people are marked `NO TALKBACK`.
-- Talkback **cannot cross breakout rooms** (a Zoom rule). The panel shows
-  who is where and refuses keys that cannot deliver.
-- Your Zoom account cannot be hosting a meeting on another device while
-  ZComms joins as you — leave it there first, or join a meeting you are
-  not hosting.
-- Headsets are still the professional choice.
+**Watch the colour, not the button.** Red means someone is genuinely
+hearing you. Amber means you are keyed and nobody is in that channel.
+Dark with `in <room>` means that person is in a breakout room ZComms is
+not in, where Zoom talkback cannot reach — the key refuses the press.
+Move the station in SETTINGS, STATION ROOM.
 
-## Troubleshooting
+## 3. Latch a feed
 
-- *"close <name> (it holds the Zoom SDK)"* — another app's Zoom engine is
-  running (OBS plugins, ZoomISO). Close it, connect again.
-- *"your Zoom account is in a meeting on another device"* — see above.
-- *A key stays amber* — that person's channel invite is still landing
-  (seconds), or they left. Red means they hear you.
-- *A panelist hears nothing on a red key* — have them check the device
-  their OS uses for **communications** audio; Zoom plays talkback there.
-- The status bar at the bottom explains every failure in plain language.
+An extern feed latches one channel of a multichannel device — a console
+bus, a Dante receiver, another intercom's mix — into a talkback channel,
+so Zoom carries it the last mile.
+
+SETTINGS, then the **extern feeds** block:
+
+1. **SOURCE** — the capture device.
+2. **CHANNEL** — which channel of it. The list is built from the device's
+   real channel count. If the driver will not report one, type it
+   (`3`, or `3-4` for a pair, which is downmixed to mono; Zoom's talkback
+   transport is mono only).
+3. **HEARD BY** — who receives it. The list names people first, then
+   spare channels nobody is on yet.
+4. **SET**, then **LATCH** on the row to put it on air.
+
+Feeds are remembered and come back when you next launch.
+
+## 4. Read the meters
+
+Each feed row has a meter before its gain keys. It is tapped ahead of the
+latch, so it reads whether or not that feed is on air — it answers "is
+signal arriving?", not "am I transmitting?".
+
+- Scale is **−60…0 dBFS** across 12 segments.
+- The first two segments are **below the −50 dBFS gate** and drawn dim,
+  with a tick at the line. Audio down there is still silence to the
+  system: it will not duck anyone, and the row reads `latched · silent`
+  even while latched.
+- **One dim segment = present, but not counted yet.** Ride the gain up
+  until you are clear of the tick.
+
+The meter on the bottom strip is your own microphone.
+
+## 5. When something is wrong
+
+- **A key stays amber.** Nobody is in that channel. Either the invite is
+  still landing (seconds) or they left. Red is the only "they hear you".
+- **A cell reads `no talkback · web`.** That person joined on the Zoom web
+  client, which physically cannot receive talkback. Ask them to rejoin in
+  the desktop or mobile app. Nothing on your side fixes it.
+- **A panelist hears nothing on a red key.** Zoom plays talkback to their
+  operating system's *communications* device, which is often not the
+  speaker their Zoom settings name. Have them check that.
+- **"close <name> (it holds the Zoom SDK)".** Another app's Zoom engine is
+  running — an OBS plugin, ZoomISO, a second ZComms. Only one Meeting SDK
+  can be initialised on a machine. Close it and connect again.
+- **"your Zoom account is in a meeting on another device".** You cannot
+  host a meeting on your own Zoom client and have ZComms join as the same
+  account. Leave it there, or join a meeting you are not hosting.
+- **Everything you key is silent, with no errors.** Check MTG MIC. Zoom
+  accepts sends from a muted client and delivers nothing.
+- **The app stops responding.** It is a known, undiagnosed fault and it is
+  rare. Every run writes `%APPDATA%\ZComms\logs\` — readable while the app
+  is running — and the last lines will say what it was doing. Send that
+  file with the report.
+
+The status strip along the bottom of the panel explains every failure in
+plain language. Click it to see the scroll-back.
+
+Use a headset. Audio fed to Zoom this way bypasses Zoom's own echo
+cancellation; ZComms carries its own (SETTINGS, ECHO CANCEL) but open
+speakers are still open speakers.
