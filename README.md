@@ -185,6 +185,27 @@ same seam a Stream Deck / Companion module drives.
 the live-found platform behaviours with their receipts. `docs/PLAN.md` is
 the architecture plan, kept for the reasoning.
 
+## License
+
+ZComms' own source is **MIT** -- see [LICENSE](LICENSE).
+
+That covers the code in this repository and nothing else, which matters
+because the installer is not only this code. What ships inside it, and what
+a build pulls in, stay under their own terms:
+
+- **Zoom Meeting SDK** -- Zoom's own licence. It is not redistributable in a
+  source tree, so `third_party/zoom-sdk/` is gitignored and you supply it to
+  build; the released installer carries the runtime, which is the licensed
+  shape for a Meeting SDK app. Using ZComms means agreeing to Zoom's terms.
+- **speexdsp** (acoustic echo cancellation) -- Xiph.org / Jean-Marc Valin,
+  BSD-style; see `third_party/speexdsp/COPYING`.
+- **miniaudio** (device I/O) -- public domain or MIT-0, at your choice.
+- **WebView2** (the panel window) -- Microsoft's terms; the SDK is fetched at
+  configure time and the loader ships beside the app.
+
+So: fork the source freely, and read Zoom's terms before you redistribute a
+build.
+
 ## Roadmap
 
 Code signing (pending a Microsoft developer account); ZComms' own Zoom
