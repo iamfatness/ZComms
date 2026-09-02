@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include "diag_log.h"
+
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -31,7 +33,18 @@ namespace zc {
 [[noreturn]] void Die(const std::string& what) {
   std::printf("\nFATAL: %s\n", what.c_str());
   std::fprintf(stderr, "\nFATAL: %s\n", what.c_str());
-  std::fflush(nullptr);
+  // Twice on purpose. The printf pair goes through the diagnostic tee, which
+  // DiagFlush then drains to the file; DiagEmergency writes the same fact
+  // directly, taking no CRT lock and no pipe, so a fatal route that fires
+  // WHILE another thread holds the stdout lock still lands in the log. The
+  // v0.1.10 hang taught the difference between "we tried to log it" and "it
+  // is in the file".
+  // Flush FIRST, then write the direct copy: that way the ordinary stream's
+  // FATAL line lands in the file ahead of the emergency duplicate instead of
+  // behind it. Chronology in a crash log is evidence (v0.1.8, the "w"/"a"
+  // split that shuffled the first field crash log).
+  DiagFlush(2000);
+  DiagEmergency("FATAL: " + what);
   const std::string text =
       what +
       "\n\nZComms has to close. This text is also in the newest file under "

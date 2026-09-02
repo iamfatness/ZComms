@@ -38,7 +38,9 @@
 #include "audio_defs.h"
 #include "channel_mix.h"
 #include "crash_trap.h"
+#include "diag_log.h"
 #include "extern_feed.h"
+#include "stall_watch.h"
 #include "signal_gate.h"
 #include "clock.h"
 #include "control_server.h"
@@ -70,64 +72,18 @@ namespace {
 // sdk.dll fastfails the process in its own DLL_PROCESS_DETACH (see the Spike A
 // harness, where the full stack is documented). Every exit goes through here.
 [[noreturn]] void HardExit(int code) {
-  std::fflush(nullptr);
+  // Drain the diagnostic tee first: TerminateProcess would otherwise kill the
+  // pump thread with the last lines -- the ones that say WHY we are exiting --
+  // still sitting in the pipe.
+  DiagFlush(1000);
   TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));
   for (;;) {}
 }
 
-// True when an interactive console exists for hotkeys (_kbhit/_getch).
+// True when an interactive console exists for hotkeys (_kbhit/_getch) and for
+// the status meter. Diagnostics themselves no longer depend on it: the log
+// file is written unconditionally (see diag_log.h).
 bool g_console_keys = false;
-
-// The exe is a Windows-subsystem app -- a real windowed app that never
-// creates a console of its own (owner, 2026-08-30: the console window
-// alongside the panel read as not-a-real-app). The printf diagnostic
-// stream is still load-bearing, so it lands somewhere useful, decided once
-// at startup in priority order: an already-redirected stdout is honored
-// (scripted runs and pipes), a parent terminal is attached (dev runs print
-// where they were typed), and an Explorer launch writes a dated log file
-// under %APPDATA%\ZComms\logs so the instruments survive with no console
-// anywhere. The panel's ops ticker remains the operator surface.
-void BindStdio() {
-  const HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
-  if (out != nullptr && out != INVALID_HANDLE_VALUE) {
-    // Inherited or redirected by the launcher: leave it alone.
-    g_console_keys = GetConsoleWindow() != nullptr;
-    return;
-  }
-  if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-    FILE* f = nullptr;
-    freopen_s(&f, "CONOUT$", "w", stdout);
-    freopen_s(&f, "CONOUT$", "w", stderr);
-    freopen_s(&f, "CONIN$", "r", stdin);
-    // The parent shell's prompt has already returned (it does not wait for
-    // a GUI-subsystem exe); start our output on a fresh line.
-    std::printf("\n");
-    g_console_keys = true;
-    return;
-  }
-  char appdata[MAX_PATH] = {};
-  if (GetEnvironmentVariableA("APPDATA", appdata, sizeof(appdata)) == 0) {
-    return;  // no console, no %APPDATA%: output goes nowhere, app still runs
-  }
-  std::string dir = std::string(appdata) + "\\ZComms";
-  CreateDirectoryA(dir.c_str(), nullptr);
-  dir += "\\logs";
-  CreateDirectoryA(dir.c_str(), nullptr);
-  SYSTEMTIME st;
-  GetLocalTime(&st);
-  char name[64];
-  std::snprintf(name, sizeof(name), "\\zcomms-%04u%02u%02u-%02u%02u%02u.log",
-                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-  const std::string path = dir + name;
-  FILE* f = nullptr;
-  // Both streams in APPEND mode: the timestamped name is fresh each launch,
-  // and "a" makes every write land at true EOF. The original "w"/"a" split
-  // gave the two streams independent file positions, which shuffled a
-  // FATAL (stderr) line into the middle of the stdout stream on the first
-  // field crash log -- chronology in a crash log is evidence, keep it.
-  freopen_s(&f, path.c_str(), "a", stdout);
-  freopen_s(&f, path.c_str(), "a", stderr);
-}
 
 struct AppConfig {
   std::string public_app_key;
@@ -170,6 +126,13 @@ struct AppConfig {
   // must only ever SELECT -- provisioning anything on a press costs the
   // first syllable (CoreVideo talkback, live-measured).
   int channels = 16;
+  // Hidden: --selftest-hang <ui|main> <seconds>. Deliberately stalls one of
+  // the two watched loops so the watchdogs can be seen to fire, on any
+  // machine, the way --selftest-crash proves the crash trap. An instrument
+  // nobody has watched work is a guess, and v0.1.10 shipped with a watchdog
+  // that had never been seen to fire.
+  std::string selftest_hang;
+  int selftest_hang_seconds = 0;
 };
 
 // Latched extern feeds: one per talkback slot, a channel (or pair) of a
@@ -741,6 +704,14 @@ int Run(int argc, char** argv) {
     else if (a == "--anon") cfg.anon = true;
     else if (a == "--open") cfg.open_browser = true;
     else if (a == "--no-open") cfg.open_browser = false;
+    else if (a == "--selftest-hang") {
+      cfg.selftest_hang = next("--selftest-hang");
+      cfg.selftest_hang_seconds = std::atoi(next("--selftest-hang"));
+      if (cfg.selftest_hang != "ui" && cfg.selftest_hang != "main") {
+        std::printf("ERROR: --selftest-hang takes ui|main <seconds>\n");
+        return 2;
+      }
+    }
     else if (a == "--selftest-crash") {
       // Hidden (not in usage): proves the crash trap end-to-end -- FATAL
       // line in the log AND the message box -- on any machine, including
@@ -772,7 +743,15 @@ int Run(int argc, char** argv) {
   LoadLocalEnv(&cfg, &meeting_arg);
   if (cfg.public_app_key.empty()) cfg.public_app_key = kDefaultPublicAppKey;
 
-  std::printf("ZComms %s -- talkback panel\n\n", kAppVersion);
+  std::printf("ZComms %s -- talkback panel\n", kAppVersion);
+  // Say where the log is, every run. The v0.1.10 hang investigation started
+  // by looking for a file that a console-launched run had never written; the
+  // path is one line and it ends that question permanently.
+  if (!DiagLogPath().empty()) {
+    std::printf("[diag] log: %s (readable while running)\n",
+                DiagLogPath().c_str());
+  }
+  std::printf("\n");
 
   // --- Control surface, FIRST ----------------------------------------------
   // The panel is the product's face, so it exists from the first moment --
@@ -978,6 +957,80 @@ int Run(int argc, char** argv) {
     ui->PublishState(j);
   };
 
+  // --- Main-loop watchdog ---------------------------------------------------
+  // APP-lifetime, not session-scoped. It used to be created inside the meeting
+  // session, which left the join-card loop -- where the app spends every
+  // minute it is not in a meeting, and where the settings drawer is perfectly
+  // usable -- watched by nothing at all.
+  //
+  // Two things also changed after v0.1.10, where a watchdog existed and still
+  // told us nothing:
+  //
+  //  - it reports through DiagEmergency, not printf. printf can BE the thing
+  //    that is hung (a console wedged by a text selection blocks every writer
+  //    inside the CRT's stdout lock), and a watchdog that reports down the
+  //    blocked channel is not a watchdog.
+  //  - it names the phase the loop was in, so the log says WHERE it stopped
+  //    and not merely that it did.
+  std::atomic<int64_t> heartbeat_ns{NowNs()};
+  std::atomic<bool> watchdog_running{true};
+  std::thread watchdog([&heartbeat_ns, &watchdog_running, &quit_req]() {
+    StallWatch watch(5000);
+    int64_t quit_asked_ms = 0;
+    while (watchdog_running.load()) {
+      Sleep(500);
+      const int64_t now_ms = NowNs() / 1'000'000;
+      watch.Beat(heartbeat_ns.load() / 1'000'000);
+      int64_t age = 0;
+      if (watch.Poll(now_ms, &age)) {
+        DiagEmergency("[watchdog] MAIN LOOP STALLED " + std::to_string(age) +
+                      " ms in: " + MainPhaseDescription());
+      }
+      int64_t lasted = 0;
+      if (watch.ConsumeRecovery(&lasted)) {
+        DiagEmergency("[watchdog] main loop recovered after " +
+                      std::to_string(lasted) + " ms");
+      }
+      // Closing the shell window sets quit_req and nothing else -- the main
+      // loop is what notices it and tears down. If the main loop is wedged the
+      // window is gone but the process lives on, and Windows eventually
+      // reports AppHangB1 and kills it: the v0.1.10 signature exactly, with
+      // the app having no say in the story. Bound it. Teardown legitimately
+      // takes a few seconds (release ramp, Leave, Cleanup), so the deadline is
+      // generous; past it we name the phase and leave on our own terms.
+      if (quit_req.load()) {
+        if (quit_asked_ms == 0) quit_asked_ms = now_ms;
+        if (now_ms - quit_asked_ms > 20000) {
+          DiagEmergency("[watchdog] quit requested 20 s ago and the main loop "
+                        "has not finished teardown -- phase: " +
+                        MainPhaseDescription() +
+                        "; exiting rather than waiting for Windows to report "
+                        "a hang");
+          DiagFlush(1000);
+          TerminateProcess(GetCurrentProcess(), 4);
+        }
+      } else {
+        quit_asked_ms = 0;
+      }
+    }
+  });
+  // Run() has many return points; the watchdog borrows Run's stack, so it must
+  // stop before any of them unwinds it.
+  struct WatchdogStop {
+    std::atomic<bool>* flag;
+    std::thread* t;
+    ~WatchdogStop() {
+      flag->store(false);
+      if (t->joinable()) t->join();
+    }
+  } watchdog_stop{&watchdog_running, &watchdog};
+
+  // Watchdog self-test, fired from the join card so it needs no meeting: five
+  // seconds in (the shell window and its pump are up by then), stall whichever
+  // loop was named and let the instrument prove itself in the log.
+  int64_t selftest_at_ns =
+      cfg.selftest_hang.empty() ? 0 : NowNs() + 5'000'000'000LL;
+
   // --- Session cycle --------------------------------------------------------
   // The app outlives its meetings. Acquire one, run it, and on any outcome
   // short of "quit" -- join failure, SDK conflict, meeting over -- come back
@@ -988,6 +1041,24 @@ int Run(int argc, char** argv) {
   for (;;) {
   // --- Acquire a meeting ----------------------------------------------------
   for (;;) {
+    heartbeat_ns.store(NowNs());
+    SetMainPhase("join card");
+    if (selftest_at_ns != 0 && NowNs() >= selftest_at_ns) {
+      selftest_at_ns = 0;
+      if (cfg.selftest_hang == "main") {
+        SetMainPhase("selftest deliberate main-loop stall");
+        std::printf("[selftest] blocking the MAIN loop for %d s\n",
+                    cfg.selftest_hang_seconds);
+        Sleep(static_cast<DWORD>(cfg.selftest_hang_seconds) * 1000);
+        std::printf("[selftest] main loop released\n");
+      } else {
+#ifdef ZCOMMS_HAVE_WEBVIEW2
+        ShellStallSelfTest(cfg.selftest_hang_seconds);
+#else
+        std::printf("[selftest] no WebView2 shell in this build\n");
+#endif
+      }
+    }
     if (!meeting_arg.empty() &&
         ParseMeetingArg(meeting_arg, &cfg.meeting_number,
                         &cfg.meeting_password)) {
@@ -1362,6 +1433,8 @@ int Run(int argc, char** argv) {
   std::string dev_json;
   // All-call latch (SPACE latches every channel); per-channel latch mask.
   uint32_t latch_mask = cfg.start_latched ? 0xFFFFFFFFu : 0u;
+  int64_t next_meter_ns = 0;  // console status repaint, 4 Hz
+  int64_t next_beat_ns = 0;   // one-line liveness record for the log, 1/min
   bool quit = false;
   bool talking = false;
   double gain_db = cfg.gain_db;
@@ -1370,30 +1443,6 @@ int Run(int argc, char** argv) {
       cfg.run_seconds > 0
           ? NowNs() + static_cast<int64_t>(cfg.run_seconds) * 1'000'000'000LL
           : 0;
-
-  // Main-loop watchdog: the one AppHangB1 on record stalled this loop with
-  // no output and no crash dump -- the worst kind of failure to diagnose
-  // after the fact. The watchdog cannot fix a hang, but it converts "the app
-  // silently stopped" into a loud, timestamped record of exactly when the
-  // loop last ran, in the console and therefore in any captured log.
-  std::atomic<int64_t> heartbeat_ns{NowNs()};
-  std::atomic<bool> watchdog_running{true};
-  std::thread watchdog([&heartbeat_ns, &watchdog_running]() {
-    bool reported = false;
-    while (watchdog_running.load()) {
-      Sleep(1000);
-      const int64_t age_ms = (NowNs() - heartbeat_ns.load()) / 1'000'000;
-      if (age_ms > 5000 && !reported) {
-        reported = true;
-        std::printf("\n[watchdog] MAIN LOOP STALLED for %lld ms -- if this "
-                    "persists the app is hung (known: AppHangB1, see "
-                    "CLAUDE.md)\n",
-                    static_cast<long long>(age_ms));
-      } else if (age_ms < 1000) {
-        reported = false;
-      }
-    }
-  });
 
   while (!quit &&
          (zoom.session_alive() || NowNs() < room_move_grace_ns)) {
@@ -1414,7 +1463,13 @@ int Run(int argc, char** argv) {
     }
     if (end_ns != 0 && NowNs() >= end_ns) break;
     heartbeat_ns.store(NowNs());
+    // Phase markers, for the watchdogs. Every call below is into somebody
+    // else's code -- the SDK, WASAPI/COM, a WebView2-facing socket -- and any
+    // of them can be the one that never returns. A stall report that names
+    // the phase turns "the app hung" into a line of investigation.
+    SetMainPhase("zoom.Pump");
     zoom.Pump(30);
+    SetMainPhase("chat.Tick");
     chat.Tick(NowNs() / 1'000'000);
 
     // Host duties + membership healing, on a coarse cadence. Invite anyone
@@ -1426,6 +1481,7 @@ int Run(int argc, char** argv) {
     // meeting-scoped and recycled, so state must die with the session.)
     roster.ConsumeDirty();
     if (NowNs() >= next_house_ns) {
+      SetMainPhase("housekeeping");
       next_house_ns = NowNs() + 2'000'000'000LL;
       zoom.AdmitAllWaiting();  // no-op unless we are host
 
@@ -1764,6 +1820,14 @@ int Run(int argc, char** argv) {
     // Publish the panel state. Built every tick and cheap; the server samples
     // it at its own cadence, so a slow tab costs nothing here.
     if (ui && NowNs() >= next_dev_ns) {
+      // The single riskiest call on this loop, and the reason it gets its own
+      // phase: ListCaptureDevices/ListPlaybackDevices build and tear down a
+      // whole miniaudio context each time, which is CoInitializeEx(MTA) +
+      // IMMDeviceEnumerator + one IMMDevice::Activate PER DEVICE for the
+      // native-format probe -- 37 ms measured on this box, but bounded only
+      // by the slowest audio driver installed. A wedged driver wedges the
+      // main loop here, and nothing else in the app would say so.
+      SetMainPhase("audio device enumeration (COM/WASAPI)");
       next_dev_ns = NowNs() + 5'000'000'000LL;
       // mics stays a flat name list (the mic picker's contract); micchans is
       // a parallel array of native channel counts, 0 = unknown, which the
@@ -1791,6 +1855,7 @@ int Run(int argc, char** argv) {
       dev_json = dj;
     }
     if (ui) {
+      SetMainPhase("publish panel state");
       std::string status = MeetingStatusName(zoom.status());
       for (char& c : status) {
         if (c == '_') c = ' ';
@@ -1963,6 +2028,7 @@ int Run(int argc, char** argv) {
     }
 
     // Apply remaining control-surface edges.
+    SetMainPhase("extern feeds");
     process_feeds();
     if (quit_req.load()) quit = true;
     if (leave_req.exchange(false)) {
@@ -2015,6 +2081,11 @@ int Run(int argc, char** argv) {
         }
       }
       if ((!want_mic.empty() || !want_out.empty()) && engine) {
+        // The settings drawer's mic/monitor pickers land here. Stopping and
+        // reopening a WASAPI device is seconds of somebody else's driver code
+        // on the main thread; if the drawer is open when the app wedges, this
+        // is one of the few paths the drawer can actually reach.
+        SetMainPhase("audio device switch (engine restart)");
         if (!want_mic.empty()) cfg.mic_device = want_mic;
         if (!want_out.empty()) cfg.monitor_device = want_out;
         const bool aec_on = engine->aec_enabled();
@@ -2170,18 +2241,43 @@ int Run(int argc, char** argv) {
       }
     }
 
-    if (engine) {
-      const EngineStats s = engine->stats();
-      std::printf("\r  [%s] %-6s  keys %02x  gain %+.0f dB  underrun %llu   ",
-                  MeterBar(s.capture_peak).c_str(), (talking ? "TALK" : ""),
-                  keys, gain_db, (unsigned long long)s.pacer.underruns);
-    } else if (test_pacer) {
-      const PacerStats p = test_pacer->stats();
-      std::printf("\r  [test-signal] keys %02x  ready %d/%d  sends %llu  "
-                  "fail %llu   ",
-                  keys, bank.channels_ready(), n_channels,
-                  (unsigned long long)p.sends,
-                  (unsigned long long)bank.send_failures());
+    // The status meter is a \r repaint for a human watching a terminal, so it
+    // is drawn only when there IS one, and at 4 Hz rather than once per
+    // Pump(30). Unthrottled and unfiltered it wrote ~2 KB/s into the log file
+    // as ONE 43.9 MB line (\r overwrites nothing on disk) -- a log nobody can
+    // open is not an instrument. The tee drops \r segments from the file for
+    // the same reason; this throttle keeps the console readable too.
+    SetMainPhase("status");
+    if (g_console_keys && NowNs() >= next_meter_ns) {
+      next_meter_ns = NowNs() + 250'000'000LL;
+      if (engine) {
+        const EngineStats s = engine->stats();
+        std::printf("\r  [%s] %-6s  keys %02x  gain %+.0f dB  underrun %llu   ",
+                    MeterBar(s.capture_peak).c_str(), (talking ? "TALK" : ""),
+                    keys, gain_db, (unsigned long long)s.pacer.underruns);
+      } else if (test_pacer) {
+        const PacerStats p = test_pacer->stats();
+        std::printf("\r  [test-signal] keys %02x  ready %d/%d  sends %llu  "
+                    "fail %llu   ",
+                    keys, bank.channels_ready(), n_channels,
+                    (unsigned long long)p.sends,
+                    (unsigned long long)bank.send_failures());
+      }
+    }
+    // What the meter used to give the log, at a cadence a log can carry: one
+    // line a minute. It is also a liveness trail -- after a hang, the last
+    // heartbeat line brackets when the loop was still running, which is the
+    // question the v0.1.10 log could not answer because there was no log.
+    if (NowNs() >= next_beat_ns) {
+      next_beat_ns = NowNs() + 60'000'000'000LL;
+      const EngineStats s = engine ? engine->stats() : EngineStats{};
+      std::printf(
+          "[heartbeat] keys %02x  peak %.3f  sends %llu  underrun %llu  "
+          "chsends %llu  fails %llu  roster %zu\n",
+          keys, s.capture_peak, (unsigned long long)s.pacer.sends,
+          (unsigned long long)s.pacer.underruns,
+          (unsigned long long)bank.channel_sends(),
+          (unsigned long long)bank.send_failures(), roster.others().size());
     }
   }
 
@@ -2190,8 +2286,7 @@ int Run(int argc, char** argv) {
   // exits the app; the meeting ending underneath us goes back to the join
   // card with the panel still alive.
   const bool app_exit = quit || (end_ns != 0 && NowNs() >= end_ns);
-  watchdog_running.store(false);
-  if (watchdog.joinable()) watchdog.join();
+  SetMainPhase("session teardown");
   std::printf("\n[zoom] leaving...\n");
   if (engine) {
     engine->SetTalk(false);
@@ -2227,7 +2322,13 @@ int main(int argc, char** argv) {
   // per-monitor-v2 rasterizes at native DPI and keeps the panel at its
   // designed logical size via devicePixelRatio.
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-  zc::BindStdio();
+  zc::StartDiagnostics();
+  // Hotkeys and the \r meter need a REAL console window, not merely a place
+  // for output: an inherited pipe is a diagnostic sink but _kbhit() has
+  // nothing to read from it and a carriage return overwrites nothing in it.
+  // (StartDiagnostics may have attached the parent's console just above, so
+  // this is asked after it, not before.)
+  zc::g_console_keys = zc::DiagHasConsole() && GetConsoleWindow() != nullptr;
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   zc::InstallCrashTrap();
   timeBeginPeriod(1);

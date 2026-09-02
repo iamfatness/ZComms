@@ -71,3 +71,4 @@ void TestSignalGate();
 void TestChannelMix();
 void TestExternFeed();
 void TestCrashTrap();
+void TestDiag();
