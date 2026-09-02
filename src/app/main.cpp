@@ -711,8 +711,13 @@ int Run(int argc, char** argv) {
     if (a == "--help" || a == "-h") { PrintUsage(); return 0; }
     else if (a == "--list-devices") {
       std::printf("Capture devices:\n");
-      for (const auto& d : ListCaptureDevices())
-        std::printf("  %s%s\n", d.name.c_str(), d.is_default ? "  (default)" : "");
+      for (const auto& d : ListCaptureDevices()) {
+        char ch[32];
+        if (d.channels) std::snprintf(ch, sizeof ch, "%d ch", d.channels);
+        else std::snprintf(ch, sizeof ch, "channels unknown");
+        std::printf("  %s%s  [%s]\n", d.name.c_str(),
+                    d.is_default ? "  (default)" : "", ch);
+      }
       std::printf("Playback devices:\n");
       for (const auto& d : ListPlaybackDevices())
         std::printf("  %s%s\n", d.name.c_str(), d.is_default ? "  (default)" : "");
@@ -1760,14 +1765,22 @@ int Run(int argc, char** argv) {
     // it at its own cadence, so a slow tab costs nothing here.
     if (ui && NowNs() >= next_dev_ns) {
       next_dev_ns = NowNs() + 5'000'000'000LL;
+      // mics stays a flat name list (the mic picker's contract); micchans is
+      // a parallel array of native channel counts, 0 = unknown, which the
+      // extern-feed channel picker reads.
       std::string dj = "\"mics\":[";
+      std::string cj = "\"micchans\":[";
       bool df = true;
       for (const auto& d : ListCaptureDevices()) {
-        if (!df) dj += ",";
+        if (!df) {
+          dj += ",";
+          cj += ",";
+        }
         df = false;
         dj += "\"" + JsonEscape(d.name) + "\"";
+        cj += std::to_string(d.channels);
       }
-      dj += "],\"outs\":[";
+      dj += "]," + cj + "],\"outs\":[";
       df = true;
       for (const auto& d : ListPlaybackDevices()) {
         if (!df) dj += ",";

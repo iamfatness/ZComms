@@ -23,6 +23,10 @@ struct DeviceInfo {
   std::string name;
   bool is_default = false;
   int index = 0;
+  // Native capture channel count, 0 when the backend will not say. The panel
+  // uses it to offer real channel picks for extern feeds; 0 means "unknown",
+  // and callers must degrade rather than assume mono.
+  int channels = 0;
 };
 
 std::vector<DeviceInfo> ListCaptureDevices();

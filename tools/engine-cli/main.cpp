@@ -65,8 +65,11 @@ NOTES
 int ListDevices() {
   std::printf("Capture devices:\n");
   for (const auto& d : ListCaptureDevices()) {
-    std::printf("  [%d] %s%s\n", d.index, d.name.c_str(),
-                d.is_default ? "   (default)" : "");
+    char ch[32];
+    if (d.channels) std::snprintf(ch, sizeof ch, "%d ch", d.channels);
+    else std::snprintf(ch, sizeof ch, "channels unknown");
+    std::printf("  [%d] %s%s   [%s]\n", d.index, d.name.c_str(),
+                d.is_default ? "   (default)" : "", ch);
   }
   std::printf("\nPlayback devices:\n");
   for (const auto& d : ListPlaybackDevices()) {

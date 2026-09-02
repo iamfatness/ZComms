@@ -42,6 +42,21 @@ std::vector<DeviceInfo> ListDevices(bool capture) {
       d.name = list[i].name;
       d.is_default = list[i].isDefault != 0;
       d.index = static_cast<int>(i);
+      // ma_context_get_devices fills in identity only; the native formats need
+      // a second per-device call. Widest native format wins -- an interface
+      // that advertises both a 2ch and an 18ch mode is an 18ch interface, and
+      // the extern-feed picker should offer all 18. A failure here leaves
+      // channels at 0, which the panel reads as "unknown" and falls back on.
+      ma_device_info info{};
+      if (ma_context_get_device_info(&ctx,
+                                     capture ? ma_device_type_capture
+                                             : ma_device_type_playback,
+                                     &list[i].id, &info) == MA_SUCCESS) {
+        for (ma_uint32 f = 0; f < info.nativeDataFormatCount; ++f) {
+          d.channels = (std::max)(d.channels,
+                                  static_cast<int>(info.nativeDataFormats[f].channels));
+        }
+      }
       out.push_back(d);
     }
   });
