@@ -149,11 +149,18 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
    one of them being cut, and the one that must never be cut is the
    person -- so each gets the full text column instead. */
 /* Input meter, sat before the gain keys: signal you can see BEFORE you
-   commit it to air. Same segment language as the mic meter, smaller,
-   because it lives inside a row rather than the status strip. */
+   commit it to air. Scaled -60..0 dBFS, NOT the mic meter's -48..0: a line
+   input arriving at -57 dBFS lit nothing at all on the first cut, which is
+   the same "no signal" dead end the meter exists to end. The first two
+   segments are BELOW the -50 dBFS SignalGate -- audio the gate still counts
+   as silence, so it neither ducks nor reads as flowing. They light in a
+   muted colour to say exactly that: present, but not yet signal. */
 .feedrow .fmeter{display:flex;gap:2px;align-items:center;grid-row:1/3}
 .feedrow .fmeter i{width:5px;height:15px;background:var(--idle)}
 .feedrow .fmeter i.on{background:var(--green)}
+.feedrow .fmeter i.sub{background:var(--idle)}
+.feedrow .fmeter i.sub.on{background:var(--legend)}
+.feedrow .fmeter i.gate{box-shadow:inset -1px 0 0 var(--edge)}
 .feedrow .fmeter i.mid{background:var(--idle)}
 .feedrow .fmeter i.mid.on{background:var(--amber)}
 .feedrow .fmeter i.cap{background:#3A2020}
@@ -573,10 +580,15 @@ function buildFeedRows(feeds){
     sp.appendChild(ci);
     sp.title='← '+f.spec;
     const mt=document.createElement('span');mt.className='fmeter';
-    mt.title='input level — pre-latch, so it reads whether or not this feed '+
-             'is on air';
-    for(let i=0;i<10;i++){const seg=document.createElement('i');
-      if(i===9)seg.className='cap';else if(i>=7)seg.className='mid';
+    mt.title='input level, -60..0 dBFS — pre-latch, so it reads whether or '+
+             'not this feed is on air. The first two segments are below the '+
+             '-50 dBFS gate: audible to you, still silence to the system.';
+    /* 12 segments over 60 dB = 5 dB each. The gate at -50 dBFS falls on the
+       2/3 boundary, so segments 0-1 are the sub-gate zone and carry a tick. */
+    for(let i=0;i<12;i++){const seg=document.createElement('i');
+      if(i===11)seg.className='cap';
+      else if(i>=9)seg.className='mid';
+      else if(i<2)seg.className='sub'+(i===1?' gate':'');
       mt.appendChild(seg);}
     const gv=document.createElement('span');gv.className='fgain';
     const gd=document.createElement('button');gd.textContent='−';
@@ -611,8 +623,8 @@ function updateFeedRows(feeds){
        would rebuild the row ten times a second and eat the LATCH click all
        over again. */
     const nz=(f.inpeak||0)/32767;
-    const db=nz>1e-4?20*Math.log10(nz):-60;
-    const lit=Math.round(Math.max(0,Math.min(1,(db+48)/48))*10);
+    const db=nz>0?20*Math.log10(nz):-99;
+    const lit=Math.ceil(Math.max(0,Math.min(1,(db+60)/60))*12);
     for(let i=0;i<e.meter.children.length;i++)
       e.meter.children[i].classList.toggle('on',i<lit);
   });
