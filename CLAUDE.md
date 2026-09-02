@@ -293,7 +293,21 @@ in ONE CreateChannel(16) request (keying must only SELECT); each capable
 participant auto-lands on their OWN channel so their key wears their name;
 spillover past 16 goes to the least-loaded channel; a partial grant proceeds
 after three rounds. Panel: ALL CALL + LATCH ALL (verbs `talkall`/`latchall`),
-empty spares hidden, chips = in-use channels + one spare.
+empty spares hidden on the desk grid.
+
+**EDIT TALENT shows the WHOLE bank (2026-09-02).** The chip set was
+in-use ∪ theirs ∪ ONE spare, which meant the only empty channel an operator
+could reach was the lowest-numbered free one -- "the edit talent doesn't seem
+to do anything you can't change channels" (owner). The assign path itself was
+never broken: `assign <slot>:<uid> on|off` -> `assign_edges` -> `intent` ->
+the healer's `InviteMany`/`Remove`, and `roster[].chans[]` publishes
+`members ∪ intent`, so a chip lights on the next 100 ms state frame, ahead of
+Zoom's async join confirmation. All 16 chips now render (a channel someone
+else is on is marked `busy`, still clickable -- a channel takes ten), and a
+`tb:false` row says WHY it has no chips and what fixes it (web client -->
+rejoin on the desktop app) instead of a bare NO TALKBACK tag. ZComms never
+calls DestroyChannel -- the bank is provisioned once -- so CoreVideo's
+destroy-leak-into-the-16-cap defect has no analogue here.
 
 ### Chat signaling (2026-08-30, plan docs/plans/2026-08-29-chat-signaling-channel.md)
 

@@ -170,19 +170,40 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
   background:var(--panel-key);color:var(--ivory);cursor:pointer;
   font:10px var(--mono);letter-spacing:.12em;padding:6px 9px}
 .feedrow button.on{border-color:var(--amber);color:var(--amber)}
-/* edit-talent list */
+/* edit-talent list: one row per person, one chip per talkback channel.
+   The chips used to be a computed subset (in-use ∪ theirs ∪ ONE spare), so
+   the only empty channel an operator could reach was the lowest-numbered
+   free one -- "the edit talent doesn't seem to do anything you can't change
+   channels" (owner, 2026-09-02). The whole bank is 16 wide and always has
+   been; the row has room for all of it, so the subset only ever hid reach. */
 .editlist{display:none;width:100%;max-width:920px;flex-direction:column;gap:8px}
 .editlist.show{display:flex}
 .editlist li{list-style:none;display:flex;justify-content:space-between;
-  align-items:center;font:12px var(--mono);color:var(--ivory);
+  align-items:center;gap:14px;font:12px var(--mono);color:var(--ivory);
   border-left:2px solid var(--edge);padding:6px 0 6px 10px}
 .editlist li.tb{border-left-color:var(--green)}
 .editlist li.no{color:var(--dim);border-left-color:var(--red)}
-.editlist small{font:10px var(--mono);letter-spacing:.22em;color:var(--dim)}
-.chips{display:flex;gap:4px}
+.editlist li.head{border-left-color:transparent;color:var(--dim);
+  font-size:10px;letter-spacing:.22em;text-transform:uppercase;padding-bottom:0}
+.editlist .who{display:flex;flex-direction:column;gap:3px;min-width:0}
+.editlist .who b{font-weight:400;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+/* the instruction has to out-read the greyed-out name above it -- --dim on
+   the rack fails contrast at 10px, and this line is the only way out. */
+.editlist .why{font:10px var(--mono);font-style:normal;color:var(--legend);
+  letter-spacing:.04em}
+.editlist small{font:10px var(--mono);letter-spacing:.22em;color:var(--dim);
+  flex-shrink:0}
+.chips{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;
+  flex-shrink:0;max-width:560px}
 .chip{appearance:none;cursor:pointer;border:1px solid var(--edge);
-  width:22px;height:20px;font:500 10px var(--mono);color:var(--dim);
-  background:var(--panel-key)}
+  min-width:24px;height:20px;padding:0 2px;font:500 10px var(--mono);
+  color:var(--dim);background:var(--panel-key)}
+.chip:hover{border-color:#4A515B;color:var(--ivory)}
+.chip:focus-visible{outline:1px solid var(--amber);outline-offset:1px}
+/* a channel someone ELSE is already on: still clickable (a channel takes
+   ten), but it must not read as free space. */
+.chip.busy{color:var(--legend);border-color:var(--legend)}
 .chip.on{color:#12141A;background:var(--green);border-color:var(--green)}
 /* ops strip: one quiet line (the latest event); click for the scroll-back.
    The information is load-bearing mid-show (why isn't my key reaching
@@ -617,29 +638,56 @@ function render(){
   /* edit-talent list */
   if(editMode){
     const r=$('editlist');r.innerHTML='';
-    const inUse=chans.map((c,i)=>i).filter(i=>{const c=chans[i];
-      return c.listeners>0||c.label||c.keyed||c.latched;});
+    // Who is on each channel, from the same server truth the chips toggle
+    // (roster.chans = confirmed membership OR pending intent), so a chip
+    // lights on the next state frame rather than waiting for Zoom's async
+    // join confirmation.
+    const occupants=chans.map((c,i)=>
+      (S.roster||[]).filter(p=>(p.chans||[])[i]));
+    if((S.roster||[]).length&&chans.length){
+      const h=document.createElement('li');h.className='head';
+      const hl=document.createElement('span');hl.textContent='talent';
+      const hr=document.createElement('span');
+      hr.textContent='channel — click a number to put someone on it';
+      h.append(hl,hr);r.appendChild(h);
+    }
     (S.roster||[]).forEach(m=>{
       const li=document.createElement('li');
       li.className=m.tb?'tb':'no';
-      const nm=document.createElement('span');
+      const who=document.createElement('span');who.className='who';
+      const nm=document.createElement('b');
       nm.textContent=m.name+(m.room?('  · in '+m.room):'');
-      li.appendChild(nm);
+      nm.title=m.name;
+      who.appendChild(nm);
       if(m.tb){
-        const mine=chans.map((c,i)=>i).filter(i=>(m.chans||[])[i]);
-        const spare=chans.findIndex((c,i)=>!inUse.includes(i)&&!mine.includes(i));
-        const slots=[...new Set([...inUse,...mine,...(spare>=0?[spare]:[])])].sort((a,b)=>a-b);
+        li.appendChild(who);
         const chips=document.createElement('span');chips.className='chips';
-        slots.forEach(i=>{
+        // Every channel, always: the operator must be able to reach the
+        // channel they actually want, not just the lowest free one.
+        chans.forEach((c,i)=>{
           const on=(m.chans||[])[i];
-          const b=document.createElement('button');b.className='chip'+(on?' on':'');
+          const others=occupants[i].filter(p=>p.uid!==m.uid).map(p=>p.name);
+          const b=document.createElement('button');
+          b.className='chip'+(on?' on':(others.length?' busy':''));
           b.textContent=i+1;
-          b.title=(on?'Remove from':'Add to')+' '+(chans[i].label||('CH '+(i+1)));
+          b.title=(on?'take off ':'put on ')+(c.label||('CH '+(i+1)))
+            +(others.length?(' — with '+others.join(', '))
+                           :(on?'':' — empty'));
           b.onclick=()=>act('assign',i+':'+m.uid+' '+(on?'off':'on'));
           chips.appendChild(b);
         });
         li.appendChild(chips);
       }else{
+        // A web-client participant physically cannot receive talkback
+        // (IUserInfo::IsSupportTalkback false; the invite itself fails
+        // INVALID_PARAMETER). A bare NO TALKBACK tag with no chips beside
+        // it is what the whole list looked like broken from -- four of ten
+        // rows dead and unexplained. Say why, and say the one fix.
+        const why=document.createElement('em');why.className='why';
+        why.textContent=
+          'on the Zoom web client — ask them to rejoin in the desktop app';
+        who.appendChild(why);
+        li.appendChild(who);
         const tag=document.createElement('small');tag.textContent='NO TALKBACK';
         li.appendChild(tag);
       }
