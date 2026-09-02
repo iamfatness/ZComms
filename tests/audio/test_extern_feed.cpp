@@ -135,4 +135,40 @@ void TestExternFeed() {
     chain.PushInterleaved(in.data(), frames, 1);
     ZC_CHECK(chain.frames_out() == after_ramp);
   }
+
+  ZC_TEST("extern_feed: input peak reads signal while UNLATCHED");
+  {
+    // The panel's whole reason for an input meter: confirm a source is
+    // arriving BEFORE committing it to air. peak() is measured after the
+    // latch envelope and is therefore zero whenever the feed is down, which
+    // is exactly when the operator needs to see level. input_peak() is the
+    // pre-envelope tap, and it must read the same signal either way.
+    zc::FeedConfig c;
+    c.device = "test";
+    c.latch = false;
+    zc::FeedChain chain(c);
+    const int frames = zc::kSampleRate / 10;
+    std::vector<float> in(frames * 2, 0.0f);
+    for (int i = 0; i < frames; ++i) {
+      in[i * 2] = 0.25f * static_cast<float>(std::sin(
+                              2.0 * 3.14159265 * 440.0 * i / zc::kSampleRate));
+    }
+    chain.PushInterleaved(in.data(), frames, 2);
+    ZC_CHECK(chain.frames_out() == 0);   // nothing goes to air
+    ZC_CHECK(chain.peak() == 0);         // post-envelope: correctly silent
+    ZC_CHECK(chain.input_peak() > 4000); // pre-envelope: the source IS there
+
+    // And it follows the gain the operator is riding, so the meter and the
+    // control beside it agree.
+    const int unity = chain.input_peak();
+    chain.SetGainDb(-20.0);
+    for (int i = 0; i < 20; ++i) chain.PushInterleaved(in.data(), frames, 2);
+    ZC_CHECK(chain.input_peak() < unity / 2);
+
+    // A silent source reads silent, so the meter cannot lie the other way.
+    chain.SetGainDb(0.0);
+    std::vector<float> quiet(frames * 2, 0.0f);
+    for (int i = 0; i < 40; ++i) chain.PushInterleaved(quiet.data(), frames, 2);
+    ZC_CHECK(chain.input_peak() < 100);
+  }
 }

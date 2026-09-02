@@ -148,8 +148,18 @@ body{background:var(--rack);color:var(--ivory);font-family:var(--disp)}
    A name and a device name cannot share one line at this width without
    one of them being cut, and the one that must never be cut is the
    person -- so each gets the full text column instead. */
+/* Input meter, sat before the gain keys: signal you can see BEFORE you
+   commit it to air. Same segment language as the mic meter, smaller,
+   because it lives inside a row rather than the status strip. */
+.feedrow .fmeter{display:flex;gap:2px;align-items:center;grid-row:1/3}
+.feedrow .fmeter i{width:5px;height:15px;background:var(--idle)}
+.feedrow .fmeter i.on{background:var(--green)}
+.feedrow .fmeter i.mid{background:var(--idle)}
+.feedrow .fmeter i.mid.on{background:var(--amber)}
+.feedrow .fmeter i.cap{background:#3A2020}
+.feedrow .fmeter i.cap.on{background:var(--red)}
 .feedrow{display:grid;
-  grid-template-columns:8px minmax(0,1fr) auto auto auto auto auto;
+  grid-template-columns:8px minmax(0,1fr) auto auto auto auto auto auto;
   grid-template-rows:auto auto;gap:2px 10px;align-items:center;
   font:13px var(--mono);color:var(--ivory);
   padding:7px 0;border-top:1px solid var(--edge)}
@@ -562,6 +572,12 @@ function buildFeedRows(feeds){
     const ci=document.createElement('i');ci.textContent=chs?'ch '+chs:'';
     sp.appendChild(ci);
     sp.title='← '+f.spec;
+    const mt=document.createElement('span');mt.className='fmeter';
+    mt.title='input level — pre-latch, so it reads whether or not this feed '+
+             'is on air';
+    for(let i=0;i<10;i++){const seg=document.createElement('i');
+      if(i===9)seg.className='cap';else if(i>=7)seg.className='mid';
+      mt.appendChild(seg);}
     const gv=document.createElement('span');gv.className='fgain';
     const gd=document.createElement('button');gd.textContent='−';
     gd.title='feed gain down';
@@ -576,8 +592,8 @@ function buildFeedRows(feeds){
       if(c)act('feed','latch '+slot+' '+(c.latch?'off':'on'));};
     const rm=document.createElement('button');rm.textContent='✕';
     rm.title='remove feed';rm.onclick=()=>act('feed','off '+slot);
-    row.append(dot,who,sp,gd,gv,gu,lb,rm);fl.appendChild(row);
-    feedEls.push({slot:slot,dot:dot,gain:gv,latch:lb});
+    row.append(dot,who,sp,mt,gd,gv,gu,lb,rm);fl.appendChild(row);
+    feedEls.push({slot:slot,dot:dot,gain:gv,latch:lb,meter:mt});
   });
 }
 function updateFeedRows(feeds){
@@ -589,6 +605,16 @@ function updateFeedRows(feeds){
       :(f.latch?(f.peak>103?'latched · audio flowing':'latched · silent'):'unlatched');
     e.gain.textContent=(f.gain>0?'+':'')+f.gain+' dB';
     e.latch.classList.toggle('on',!!f.latch);
+    /* inpeak is 0..32767 from the chain; the mic meter's scale is 0..1, so
+       normalise and share the same -48..0 dBFS mapping. Updated in place --
+       a moving meter must never touch the row's structure signature, or it
+       would rebuild the row ten times a second and eat the LATCH click all
+       over again. */
+    const nz=(f.inpeak||0)/32767;
+    const db=nz>1e-4?20*Math.log10(nz):-60;
+    const lit=Math.round(Math.max(0,Math.min(1,(db+48)/48))*10);
+    for(let i=0;i<e.meter.children.length;i++)
+      e.meter.children[i].classList.toggle('on',i<lit);
   });
 }
 function renderFeeds(){

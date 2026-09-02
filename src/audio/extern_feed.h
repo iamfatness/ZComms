@@ -74,8 +74,15 @@ class FeedChain {
   const FeedConfig& config() const { return cfg_; }
   uint64_t frames_out() const { return frames_out_.load(); }
   uint64_t drops() const { return ring_.drops(); }
-  // Decaying post-envelope peak (0..32767) for the panel's feed VU/lamp.
+  // Decaying post-envelope peak (0..32767) for the panel's feed lamp: what
+  // is actually reaching the channel.
   int peak() const { return peak_.load(); }
+  // Decaying PRE-envelope peak (0..32767), post-gain, for the panel's input
+  // meter. peak() is zero whenever the feed is down, which is precisely when
+  // the operator needs to see whether a source is arriving -- you check a
+  // line before you open it, not after. Taken after the gain stage so the
+  // meter and the gain keys beside it agree.
+  int input_peak() const { return in_peak_.load(); }
 
  private:
   FeedConfig cfg_;
@@ -87,6 +94,7 @@ class FeedChain {
   std::vector<float> mono_;
   std::atomic<bool> latched_{false};
   std::atomic<int> peak_{0};
+  std::atomic<int> in_peak_{0};
   std::atomic<uint64_t> frames_out_{0};
 };
 
