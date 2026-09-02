@@ -389,7 +389,7 @@ settings drawer has the picker/LATCH/gain rows and cells show a FEED tag.
 The feeds block spans the whole drawer (`.field.wide`) because it does not
 fit a 260 px auto-fit column -- the first cut truncated device names to
 "Sur" and clipped the channel placeholder. The add-feed form is a labeled
-SOURCE / CHANNEL / INTO stack, and CHANNEL is a real picker built from the
+SOURCE / CHANNEL / HEARD BY stack, and CHANNEL is a real picker built from the
 device's native count: `DeviceInfo::channels` (a per-device
 `ma_context_get_device_info` in `ListDevices`, widest native format wins)
 rides to the panel as `micchans[]`, parallel to `mics[]`. 0 = the backend
@@ -399,6 +399,21 @@ Verbs: `feed set <slot> <device:ch[-ch2]>` / `feed latch <slot> on|off` /
 `feed gain <slot> <db>` / `feed off <slot>` (slots 0-based like every
 other verb). Unlatch drains the ramp-out tail before the slot stops being
 serviced (cutting it would put back the click the envelope removes).
+
+**A destination is a PERSON, not a number (owner, 2026-09-02).** v0.1.10's
+`INTO [CH 1..CH 16]` dropdown made the operator translate a slot number back
+into a name the panel already knew -- the intercom-grid model's whole point
+is that a channel wears the person on it. So the destination picker is
+grouped "on a channel now" (the person's label, `· ch N` demoted after it)
+over "spare channels" (`ch N -- nobody on it yet`; a feed may legitimately
+be latched where nobody is yet), rebuilt off a label signature; feed rows
+stack the person over a dim source line, because a name and a device name
+cannot share one line at 1000 px without cutting one, and the one that must
+never be cut is the person. Slot numbers stay wherever they are the honest
+identifier: the ops log, the verbs, and a cell for a channel with no one on
+it. The panel is renderable with no meeting -- extract `kPanelHtml` to a
+file, append a mock `S`, serve over http (file:// is blocked) and shoot it
+at 1000x640, the shell's exact client size.
 
 Verified: 100/100 unit tests (gate, mix truth table + ramp + clamp,
 extract/downmix, spec/env round-trip, chain latch semantics); live on this
