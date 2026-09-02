@@ -133,11 +133,15 @@ unit-tested but have not been proven in front of an audience.
   staffing its *own* breakout rooms has not been run live.
 - **Chat signaling** desk-to-desk needs a second desk and has not been
   exercised.
-- **One hang is undiagnosed.** Two occurrences of an AppHangB1 — Windows
-  killing the process for not pumping messages — neither reproduced.
-  v0.1.11 did not fix it; it made it *diagnosable*. The log is now always
-  written and readable while running, and two watchdogs report out of band,
-  so the next occurrence should name itself.
+- **An earlier hang is fixed, and one older occurrence is unproven.** The
+  v0.1.10 AppHangB1 — Windows killing the process for not pumping messages —
+  was root-caused with a captured stack and fixed in v0.1.12: launched from
+  a shell whose output nobody reads, the app's own status output filled the
+  64 KB pipe and the main thread blocked forever inside `printf`. Launching
+  normally was never affected. An older 2026-08-28 occurrence is consistent
+  with the same mechanism but was never captured, so it is not proven. Both
+  loops are now watched and the log is always written and readable while
+  running, so anything new should name itself.
 
 Zoom's talkback API entitlement is also undocumented policy. It worked on
 an ordinary account, but it is the API behind a paid Zoom product, and
