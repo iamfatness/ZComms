@@ -102,8 +102,13 @@ class ZoomClientWin : public ZoomClient,
   std::unique_ptr<TalkbackSdk> MakeTalkbackSdk() override;
 
   // Windows-only extras: raw Windows SDK types, whose only consumers
-  // (roster.cpp, breakout.cpp, chat_signals.cpp) are themselves Windows-only.
-  // Not on the seam -- see zoom_client.h's header comment.
+  // (roster.cpp, breakout.cpp, chat_signals.cpp; and, for the controller
+  // below, spikes/a-tx-latency's single-channel ZoomTalkbackSource, which
+  // predates and is independent of TalkbackSdk/TalkbackChannels) are
+  // themselves Windows-only. Not on the seam -- see zoom_client.h's header
+  // comment.
+  ZOOM_SDK_NAMESPACE::IMeetingTalkbackController* GetTalkbackController();
+
   ZOOM_SDK_NAMESPACE::IMeetingParticipantsController* GetParticipantsController();
 
   ZOOM_SDK_NAMESPACE::IMeetingBOController* GetBOController();
