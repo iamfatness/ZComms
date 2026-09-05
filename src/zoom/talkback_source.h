@@ -24,7 +24,7 @@
 // in measures nothing.
 #pragma once
 
-// See mic_source.h: the SDK headers depend on windows.h having been included.
+// See mic_source_win.h: the SDK headers depend on windows.h having been included.
 // clang-format off
 #include <windows.h>
 // clang-format on

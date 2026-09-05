@@ -11,7 +11,7 @@
 // control.
 #pragma once
 
-// See mic_source.h: the SDK headers depend on windows.h having been included.
+// See mic_source_win.h: the SDK headers depend on windows.h having been included.
 // clang-format off
 #include <windows.h>
 // clang-format on
@@ -26,7 +26,7 @@
 #include "meeting_service_components/meeting_audio_interface.h"
 #include "meeting_service_components/meeting_configuration_interface.h"
 #include "meeting_service_interface.h"
-#include "mic_source.h"
+#include "mic_source_win.h"
 #include "zoom_sdk.h"
 
 namespace zc {
@@ -77,7 +77,7 @@ class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
   static constexpr int kFailAccountBusyElsewhere = 909001;
 
   // setExternalAudioSource. This one call is the entire TX path (plan §2).
-  bool InstallVirtualMic(ZoomMicSource* source, std::string* error);
+  bool InstallVirtualMic(ZoomMicSourceWin* source, std::string* error);
 
   bool JoinVoip(std::string* error);
   bool LeaveVoip(std::string* error);

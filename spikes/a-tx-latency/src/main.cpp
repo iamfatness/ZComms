@@ -25,7 +25,7 @@
 #include "config.h"
 #include "generator.h"
 #include "loopback.h"
-#include "mic_source.h"
+#include "mic_source_win.h"
 #include "probe.h"
 #include "signal.h"
 #include "stats.h"
@@ -592,7 +592,7 @@ int DoMeasure(const Config& cfg) {
   std::printf("[sdk] in meeting\n");
 
   // Both transports exist for the run's lifetime; only one is the sink.
-  ZoomMicSource mic;
+  ZoomMicSourceWin mic;
   std::unique_ptr<ZoomTalkbackSource> talkback;
   FrameSink* sink = nullptr;
 
