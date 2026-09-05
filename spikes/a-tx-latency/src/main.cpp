@@ -590,7 +590,11 @@ int DoMeasure(const Config& cfg) {
   }
   std::printf("[sdk] in meeting\n");
 
-  // Both transports exist for the run's lifetime; only one is the sink.
+  // Only one transport is ever constructed -- whichever cfg.transport picks
+  // below -- and it is the sink; the other's unique_ptr stays null for the
+  // run's whole lifetime. (This comment used to claim both transports exist
+  // for the run's lifetime; that stopped being true once the talkback path
+  // stopped eagerly constructing a VirtualMic it would never use.)
   std::unique_ptr<VirtualMic> mic;
   std::unique_ptr<ZoomTalkbackSource> talkback;
   FrameSink* sink = nullptr;

@@ -107,6 +107,45 @@ ambiguous. It should be its own change, against the CI gate this project builds.
 Six abstract interfaces, two implementations each, selected at build time.
 `main.cpp` constructs whichever the build gave it and contains **zero `#ifdef`**.
 
+> **Amendment, 2026-09-05, after P1-A execution.** The zero-`#ifdef` promise
+> above does **not** hold, and it was already broken before this branch. Left
+> standing, as §2's amendment is, because the claim is what was believed
+> going in and the correction is what execution found.
+>
+> It was never literally true: `main.cpp` predates this branch with three
+> `#ifdef ZCOMMS_HAVE_WEBVIEW2` blocks gating the WebView2 shell (the include
+> at line 48, and the two functional blocks at lines 902 and 1072) — at
+> least two of which change control flow, not just an include. This was true
+> before P1-A touched the file at all.
+>
+> P1-A makes the file **more** hard-wired to Windows than before, not less.
+> `main.cpp:65` includes `zoom_client_win.h` and `main.cpp:1150` constructs a
+> concrete `ZoomClientWin` directly — there is no `MakeZoomClient()` factory
+> anywhere in this codebase. Four Windows-only members then get called on
+> that concrete object, not the `ZoomClient` interface: the three raw-SDK-
+> type getters this section already calls out below —
+> `GetParticipantsController()`, `GetBOController()`, `GetChatController()`
+> (`main.cpp:1254`, `1260`, `1272`) — plus a fourth this section's original
+> text didn't name, `Authenticate()` (`main.cpp:1156`, the `cfg.anon` guest-
+> join path). All four exist on `ZoomClientWin` and not on `ZoomClient`
+> precisely because their return types or parameters are Windows SDK types
+> with no macOS equivalent, and because their only consumers —
+> `roster.cpp`, `breakout.cpp`, `chat_signals.cpp` — are themselves
+> Windows-only files this phase does not port (§2's 2026-09-05 amendment).
+> `main.cpp` cannot hold an abstract `ZoomClient` while it still has to feed
+> concrete SDK types to those three files.
+>
+> **This changes what §7's P2 is.** "`main.cpp` de-Win32'd" as P2's exit
+> criterion currently reads like the `ShellExecuteA`/`Sleep` cleanup §2
+> describes — genuinely small. It is not: before `main.cpp` can construct a
+> `ZoomClient` through a factory and drop the concrete `ZoomClientWin` type
+> (and its `Authenticate`), P2 must first seam `roster`/`breakout`/
+> `chat_signals` the way §3.3 seams `TalkbackSdk` — three more SDK-bound
+> adapters, each its own `.h`/`_win.cpp`/`_mac.mm` split, not a rename. The
+> next plan that scopes P2 should size it as seam-and-port work for those
+> three files plus the factory, not as the de-Win32 cleanup this section
+> implies.
+
 ### §3.1 SDK-facing
 
 | Seam | Today | Windows impl | macOS impl |

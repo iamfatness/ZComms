@@ -60,6 +60,17 @@
   Requires: the meeting to exist, and ZComms to be made host or co-host once
   it joins (Zoom requires that role to create talkback channels). The script
   says so, loudly, if the bank never comes up.
+
+  Also requires a signed-in Zoom session already on this machine. This
+  script launches with --no-open (no WebView2 window, no browser) and
+  without --anon, so if EnsureJoinCredentials (main.cpp:1141) has no
+  cached, valid OAuth session to redeem, there is no window for a human to
+  sign in through and no anonymous fallback either -- the join call simply
+  never succeeds. The run does not fail fast on that: it looks exactly like
+  a slow join and dies 90 s later (JoinTimeoutSec) with "never reached the
+  meeting". Sign in once via a normal windowed run first, or pass -Exe at
+  an anonymous-capable build and add --anon support here, before assuming a
+  timeout means the meeting itself was the problem.
 #>
 
 [CmdletBinding()]
@@ -261,16 +272,35 @@ if ($existing) {
 # --seconds      a hard ceiling. A smoke test that can hang forever is a smoke
 #                test nobody runs twice.
 # ---------------------------------------------------------------------------
+
+# Start-Process -ArgumentList joins the array into one command line with a
+# plain space and does NO quoting of its own (confirmed on both Windows
+# PowerShell 5.1 and PS 7). An element containing a space therefore arrives
+# at the child as two separate argv entries: the default -Name "ZComms
+# smoke" became "--name" "ZComms" "smoke", and zcomms.exe's arg parser fell
+# into the unknown-argument branch on the bare "smoke", printed usage, and
+# exited 2. That failure looks like a control-server problem -- the process
+# is just gone -- unless you go read the exit code. Every array element that
+# can hold a space must carry its own embedded quotes so the joined command
+# line re-splits correctly; embed them here rather than depending on the
+# caller to quote at the call site.
+function Quote-ArgValue {
+  param([string]$Value)
+  return '"' + ($Value -replace '"', '\"') + '"'
+}
+
 $appArgs = @(
   "--meeting", $Meeting,
-  "--name", $Name,
+  "--name", (Quote-ArgValue $Name),
   "--channels", $Channels,
   "--ui-port", $Port,
   "--no-open",
   "--test-signal",
   "--seconds", ($JoinTimeoutSec + $BankTimeoutSec + 120)
 )
-if ($Passcode) { $appArgs += @("--passcode", $Passcode) }
+# A passcode is operator-supplied free text, same as -Name -- nothing stops
+# it containing a space, so it gets the same quoting.
+if ($Passcode) { $appArgs += @("--passcode", (Quote-ArgValue $Passcode)) }
 
 Write-Host "Launching..." -ForegroundColor Cyan
 $script:Proc = Start-Process -FilePath $exeFull -ArgumentList $appArgs -PassThru
