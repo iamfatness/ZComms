@@ -1,242 +1,165 @@
-// SDK lifecycle: init, authenticate, join, install the virtual mic.
+// The Zoom Meeting SDK's lifecycle, as ZComms needs it -- and nothing else.
 //
-// Everything here runs on the thread that called InitSDK, and that thread
-// pumps the Windows message queue. The Windows Meeting SDK delivers its
-// callbacks through the message loop, so a harness that simply slept would
-// authenticate and join exactly never -- which presents as a silent hang and
-// is a genuinely confusing first failure.
+// Two implementations: Windows (IAuthService/IMeetingService, callbacks
+// delivered by pumping a Win32 message loop) and macOS (the ObjC framework,
+// callbacks delivered on a run loop). Neither shape is visible here.
 //
-// The TX thread is separate and is the only thread that touches send(), which
-// is also plan §5's rule about never running media on the thread that handles
-// control.
+// WHAT IS DELIBERATELY NOT ON THIS INTERFACE. The Windows class also hands
+// out IMeetingParticipantsController, IMeetingBOController and
+// IMeetingChatController. Those are raw Windows SDK types, and their only
+// consumers -- roster.cpp, breakout.cpp, chat_signals.cpp -- are themselves
+// Windows-only (they derive from ZOOM_SDK_NAMESPACE interfaces; see
+// docs/plans/2026-09-04-macos-port.md section 2's 2026-09-05 amendment).
+// Putting them here would drag the whole Windows SDK across the seam to
+// serve code that cannot run on the other side of it. They stay on
+// ZoomClientWin, fetched once at construction.
+//
+// Talkback and the virtual mic go the other way: they WERE raw-pointer
+// getters and are now FACTORIES, so each backend builds its own adapter and
+// no SDK pointer crosses this line.
 #pragma once
 
-// See mic_source_win.h: the SDK headers depend on windows.h having been included.
-// clang-format off
-#include <windows.h>
-// clang-format on
-
-#include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
-#include "auth_service_interface.h"
-#include "meeting_service_components/meeting_audio_interface.h"
-#include "meeting_service_components/meeting_configuration_interface.h"
-#include "meeting_service_interface.h"
-#include "mic_source_win.h"
-#include "zoom_sdk.h"
+#include "talkback_sdk.h"
+#include "virtual_mic.h"
 
 namespace zc {
 
-class ZoomClient : public ZOOM_SDK_NAMESPACE::IAuthServiceEvent,
-                   public ZOOM_SDK_NAMESPACE::IMeetingServiceEvent,
-                   public ZOOM_SDK_NAMESPACE::IMeetingAudioCtrlEvent,
-                   public ZOOM_SDK_NAMESPACE::IMeetingConfigurationEvent {
+// Where a meeting is, normalised. The platforms enumerate these differently
+// and ZComms only ever asks two questions of them -- see in_meeting() and
+// session_alive() below.
+enum class MeetingState {
+  Idle,
+  Connecting,
+  WaitingForHost,
+  InWaitingRoom,
+  InMeeting,
+  Reconnecting,
+  JoiningBreakout,
+  LeavingBreakout,
+  Failed,
+  Ended,
+};
+
+const char* MeetingStateName(MeetingState s);
+
+// The passcode conversation's state. Zoom asks for a passcode through a
+// callback; with nobody listening a passcode-protected meeting dies as a
+// misleading "meeting ended" join failure (live-diagnosed 2026-08-29).
+enum class PasscodeState {
+  NotAsked,
+  Needed,
+  WasWrong,
+};
+
+class ZoomClient {
  public:
-  ~ZoomClient();
+  virtual ~ZoomClient() = default;
 
-  bool Init(std::string* error);
-
-  // Uses the public app key if present, otherwise mints a JWT from
-  // sdk_key/sdk_secret. Blocks (pumping messages) until the SDK answers.
-  bool Authenticate(const std::string& public_app_key, const std::string& sdk_key,
-                    const std::string& sdk_secret, int timeout_ms,
-                    std::string* error);
+  virtual bool Init(std::string* error) = 0;
 
   // Auth with a ready-made Meeting SDK JWT (the broker mints it from the
-  // operator's OAuth session). This is the signed-in path -- paired with a
-  // ZAK on Join, the client is the operator's account, not an anonymous
-  // guest, which is what lifts the cross-account join refusal (fail 504).
-  bool AuthenticateWithJwt(const std::string& jwt, int timeout_ms,
-                           std::string* error);
+  // operator's OAuth session). Paired with a ZAK on Join, the client is the
+  // operator's account rather than an anonymous guest, which is what lifts
+  // the cross-account join refusal (fail 504). Blocks, pumping, until the
+  // SDK answers or `timeout_ms` elapses.
+  virtual bool AuthenticateWithJwt(const std::string& jwt, int timeout_ms,
+                                   std::string* error) = 0;
 
-  // on_tick (optional) runs every pump iteration of the join wait, so the
-  // caller can surface progress, collect a passcode -- and CANCEL: a false
-  // return aborts the join (the operator's only exit from a stuck waiting
-  // room / never-admitted join used to be killing the app, 2026-08-30).
-  // zak, when non-empty, joins as the signed-in user (JoinParam userZAK).
-  bool Join(uint64_t meeting_number, const std::string& password,
-            const std::string& display_name, int timeout_ms, std::string* error,
-            const std::function<bool()>& on_tick = nullptr,
-            const std::string& zak = std::string());
+  // `on_tick` runs every pump iteration of the join wait so the caller can
+  // surface progress, supply a passcode -- and CANCEL: returning false
+  // aborts the join. Before that existed, the operator's only exit from a
+  // stuck waiting room was killing the app (2026-08-30).
+  // `zak` non-empty joins as the signed-in user.
+  virtual bool Join(uint64_t meeting_number, const std::string& password,
+                    const std::string& display_name, int timeout_ms,
+                    std::string* error,
+                    const std::function<bool()>& on_tick = nullptr,
+                    const std::string& zak = std::string()) = 0;
 
-  // Passcode conversation, driven by onInputMeetingPasswordAndScreenName-
-  // Notification. A bare meeting ID on a passcode-protected meeting used to
-  // die as a misleading "meeting ended" join failure -- the SDK was asking
-  // for the passcode and nobody was listening.
-  //   0 = not asked, 1 = passcode needed, 2 = passcode was wrong, ask again.
-  int passcode_state() const { return passcode_state_.load(); }
-  bool SubmitPasscode(const std::string& passcode);
+  virtual PasscodeState passcode_state() const = 0;
+  virtual bool SubmitPasscode(const std::string& passcode) = 0;
 
-  // Local (non-Zoom) failure code: the signed-in account is already in a
-  // meeting on another device and we refused to end it. Chosen outside
-  // Zoom's MeetingFailCode range.
-  static constexpr int kFailAccountBusyElsewhere = 909001;
+  // Installs a never-fed virtual mic. This is the auto-suppress trick: an
+  // open-but-silent meeting mic, so talkback stays deliverable (delivery law
+  // 1: talkback arrives ONLY while this client's meeting audio is open)
+  // while the room hears nothing. Returns null on failure with `error` set --
+  // typically an auth tier without the raw-data entitlement, where the
+  // callbacks never fire and the operator must point Zoom at a dead input.
+  // The caller owns the result and must keep it alive for the session.
+  virtual std::unique_ptr<VirtualMic> InstallVirtualMic(std::string* error) = 0;
 
-  // setExternalAudioSource. This one call is the entire TX path (plan §2).
-  bool InstallVirtualMic(ZoomMicSourceWin* source, std::string* error);
+  // The talkback controller for this meeting, already wrapped. Null when the
+  // meeting has none. The caller owns the result and must keep it alive for
+  // as long as anything holds a TalkbackSdk* into it.
+  virtual std::unique_ptr<TalkbackSdk> MakeTalkbackSdk() = 0;
 
-  bool JoinVoip(std::string* error);
-  bool LeaveVoip(std::string* error);
+  virtual bool JoinVoip(std::string* error) = 0;
+  virtual bool LeaveVoip(std::string* error) = 0;
 
-  // Unmutes this client in the meeting. A meeting with mute-on-entry admits
-  // the harness muted, and a muted client's virtual mic never receives
-  // onMicStartSend -- the send window simply stays shut. Host-side unmute of
-  // an SDK client can require a consent handshake this harness does not
-  // implement, so it unmutes itself.
-  bool UnmuteSelf(std::string* error);
-
-  // Whether this client's meeting audio is muted. Talkback DELIVERY only
-  // happens while it is open (owner-found live, 2026-08-29: muted = sends
-  // accepted by the SDK, silence at every member).
-  bool SelfMuted();
-
+  // Unmutes this client. A meeting with mute-on-entry admits the client
+  // muted, and a muted client's virtual mic never receives onMicStartSend --
+  // the send window simply stays shut. Host-side unmute of an SDK client can
+  // require a consent handshake ZComms does not implement, so it unmutes
+  // itself.
+  virtual bool UnmuteSelf(std::string* error) = 0;
+  virtual bool SelfMuted() = 0;
   // Logs this client's audio connection and mute state, so "the send window
   // never opened" comes with the reason attached instead of being a mystery.
-  void LogSelfAudioState(const char* tag);
+  virtual void LogSelfAudioState(const char* tag) = 0;
 
-  // The talkback controller for this meeting, or null.
-  ZOOM_SDK_NAMESPACE::IMeetingTalkbackController* GetTalkbackController();
+  // Everyone except this client -- the people a talkback channel addresses.
+  virtual std::vector<unsigned int> GetOtherParticipants() = 0;
+  // Host/co-host only; a no-permission failure is expected when not host and
+  // is not worth surfacing every tick.
+  virtual bool AdmitAllWaiting() = 0;
 
-  ZOOM_SDK_NAMESPACE::IMeetingParticipantsController* GetParticipantsController();
+  virtual void Leave() = 0;
+  virtual void Cleanup() = 0;
 
-  ZOOM_SDK_NAMESPACE::IMeetingBOController* GetBOController();
+  // Runs the platform's callback loop for `ms`. Anything that waits in this
+  // codebase waits by calling this -- a harness that simply slept would
+  // authenticate and join exactly never, which presents as a silent hang.
+  virtual void Pump(int ms) = 0;
 
-  ZOOM_SDK_NAMESPACE::IMeetingChatController* GetChatController();
+  virtual MeetingState state() const = 0;
+  // The local failure code from the last failed join, or 0. Kept distinct
+  // from state(): Zoom's FAILED code gets clobbered by the ENDED that
+  // follows it (ENDED carries result 0), so the code is latched.
+  virtual int last_fail_code() const = 0;
+  virtual std::string FailReason(int code) const = 0;
 
-  // Admits everyone currently in the waiting room. Host/co-host only; a
-  // no-permission failure is expected when not host and is not an error worth
-  // surfacing every tick.
-  bool AdmitAllWaiting();
+  bool in_meeting() const { return state() == MeetingState::InMeeting; }
 
-  // Every participant except this client -- the people a talkback channel
-  // would be addressed to.
-  std::vector<unsigned int> GetOtherParticipants();
-
-  void Leave();
-  void Cleanup();
-
-  // Runs the message loop for `ms`, which is how SDK callbacks get delivered.
-  // Anything that waits in this harness waits by calling this.
-  void Pump(int ms);
-
-  ZOOM_SDK_NAMESPACE::MeetingStatus status() const { return status_.load(); }
-  bool in_meeting() const {
-    return status_.load() == ZOOM_SDK_NAMESPACE::MEETING_STATUS_INMEETING;
-  }
-  // The session-loop liveness test. Distinct from in_meeting(): moving
-  // between breakout rooms transitions through JOIN/LEAVE_BREAKOUT_ROOM
-  // (and network blips through RECONNECTING) -- treating those as "meeting
-  // over" tore the whole session down on the FIRST live room hop
-  // (2026-08-30: station entered a breakout, app declared meeting ended).
+  // The session-loop liveness test, distinct from in_meeting(): a breakout
+  // move transitions through Join/LeaveBreakout and Reconnecting, and a
+  // network blip through Reconnecting. Treating those as "meeting over" tore
+  // the whole session down on the FIRST live room hop (2026-08-30).
+  // Connecting appears mid-session during a breakout move's rejoin leg; by
+  // construction the session loop only runs after the first join, so here it
+  // never means "still joining".
   bool session_alive() const {
-    switch (status_.load()) {
-      case ZOOM_SDK_NAMESPACE::MEETING_STATUS_INMEETING:
-      case ZOOM_SDK_NAMESPACE::MEETING_STATUS_JOIN_BREAKOUT_ROOM:
-      case ZOOM_SDK_NAMESPACE::MEETING_STATUS_LEAVE_BREAKOUT_ROOM:
-      case ZOOM_SDK_NAMESPACE::MEETING_STATUS_RECONNECTING:
-      // CONNECTING appears mid-session during a breakout move's rejoin leg
-      // (JOIN_BREAKOUT_ROOM -> RECONNECTING -> CONNECTING -> INMEETING,
-      // captured live 2026-08-30); by construction the session loop only
-      // runs after the first join, so it never means "still joining" here.
-      case ZOOM_SDK_NAMESPACE::MEETING_STATUS_CONNECTING:
+    switch (state()) {
+      case MeetingState::InMeeting:
+      case MeetingState::JoiningBreakout:
+      case MeetingState::LeavingBreakout:
+      case MeetingState::Reconnecting:
+      case MeetingState::Connecting:
         return true;
       default:
         return false;
     }
   }
 
-  // IAuthServiceEvent
-  void onAuthenticationReturn(ZOOM_SDK_NAMESPACE::AuthResult ret) override;
-  void onLoginReturnWithReason(ZOOM_SDK_NAMESPACE::LOGINSTATUS ret,
-                               ZOOM_SDK_NAMESPACE::IAccountInfo* info,
-                               ZOOM_SDK_NAMESPACE::LoginFailReason reason) override;
-  void onLogout() override;
-  void onZoomIdentityExpired() override;
-  void onZoomAuthIdentityExpired() override;
-  void onNotificationServiceStatus(
-      ZOOM_SDK_NAMESPACE::SDKNotificationServiceStatus status,
-      ZOOM_SDK_NAMESPACE::SDKNotificationServiceError error) override;
-
-  // IMeetingServiceEvent
-  void onMeetingStatusChanged(ZOOM_SDK_NAMESPACE::MeetingStatus status,
-                              int result) override;
-  void onMeetingStatisticsWarningNotification(
-      ZOOM_SDK_NAMESPACE::StatisticsWarningType type) override;
-  void onMeetingParameterNotification(
-      const ZOOM_SDK_NAMESPACE::MeetingParameter* param) override;
-  void onSuspendParticipantsActivities() override;
-  void onAICompanionActiveChangeNotice(bool active) override;
-  void onMeetingTopicChanged(const zchar_t* topic) override;
-  void onMeetingFullToWatchLiveStream(const zchar_t* url) override;
-  void onUserNetworkStatusChanged(ZOOM_SDK_NAMESPACE::MeetingComponentType type,
-                                  ZOOM_SDK_NAMESPACE::ConnectionQuality level,
-                                  unsigned int user_id, bool uplink) override;
-  void onAppSignalPanelUpdated(
-      ZOOM_SDK_NAMESPACE::IMeetingAppSignalHandler* handler) override;
-
-  // IMeetingAudioCtrlEvent
-  void onUserAudioStatusChange(
-      ZOOM_SDK_NAMESPACE::IList<ZOOM_SDK_NAMESPACE::IUserAudioStatus*>* list,
-      const zchar_t* json) override;
-  void onUserActiveAudioChange(
-      ZOOM_SDK_NAMESPACE::IList<unsigned int>* list) override;
-  void onHostRequestStartAudio(
-      ZOOM_SDK_NAMESPACE::IRequestStartAudioHandler* handler) override;
-  void onJoin3rdPartyTelephonyAudio(const zchar_t* audio_info) override;
-  void onMuteOnEntryStatusChange(bool enabled) override;
-
-  // IMeetingConfigurationEvent (only the passcode prompt matters here)
-  void onInputMeetingPasswordAndScreenNameNotification(
-      ZOOM_SDK_NAMESPACE::IMeetingPasswordAndScreenNameHandler* handler)
-      override;
-  void onWebinarNeedRegisterNotification(
-      ZOOM_SDK_NAMESPACE::IWebinarNeedRegisterHandler*) override;
-  void onEndOtherMeetingToJoinMeetingNotification(
-      ZOOM_SDK_NAMESPACE::IEndOtherMeetingToJoinMeetingHandler*) override;
-  void onWebinarNeedInputScreenName(
-      ZOOM_SDK_NAMESPACE::IWebinarInputScreenNameHandler*) override;
-  void onJoinMeetingNeedUserInfo(
-      ZOOM_SDK_NAMESPACE::IMeetingInputUserInfoHandler* handler) override;
-  void onUserConfirmToStartArchive(
-      ZOOM_SDK_NAMESPACE::IMeetingArchiveConfirmHandler*) override {}
-  void onUserConfirmRecoverMeeting(
-      ZOOM_SDK_NAMESPACE::IMeetingConfirmRecoverHandler*) override {}
-  // IMeetingConfigurationFreeMeetingEvent (inherited noise)
-  void onFreeMeetingRemainTime(unsigned int) override {}
-  void onFreeMeetingRemainTimeStopCountDown() override {}
-  void onFreeMeetingNeedToUpgrade(FreeMeetingNeedUpgradeType,
-                                  const zchar_t*) override {}
-  void onFreeMeetingUpgradeToGiftFreeTrialStart() override {}
-  void onFreeMeetingUpgradeToGiftFreeTrialStop() override {}
-  void onFreeMeetingUpgradeToProMeeting() override {}
-
- private:
-  ZOOM_SDK_NAMESPACE::IAuthService* auth_ = nullptr;
-  ZOOM_SDK_NAMESPACE::IMeetingService* meeting_ = nullptr;
-  std::atomic<ZOOM_SDK_NAMESPACE::MeetingStatus> status_{
-      ZOOM_SDK_NAMESPACE::MEETING_STATUS_IDLE};
-  std::atomic<int> auth_result_{-1};
-  std::atomic<bool> auth_returned_{false};
-  std::atomic<int> last_fail_code_{0};
-  bool sdk_initialised_ = false;
-
-  // The pending passcode prompt. The handler is only touched on the SDK's
-  // callback thread (which is the pumping thread), and the SDK destroys it
-  // the moment Input...() or Cancel() is called.
-  ZOOM_SDK_NAMESPACE::IMeetingPasswordAndScreenNameHandler* pw_handler_ =
-      nullptr;
-  std::atomic<int> passcode_state_{0};
-  std::string display_name_;
+  // Local failure code: the signed-in account is already in a meeting on
+  // another device and we refused to end it. Chosen outside Zoom's
+  // MeetingFailCode range.
+  static constexpr int kFailAccountBusyElsewhere = 909001;
 };
-
-// Human-readable forms. A raw enum ordinal in a failure message costs whoever
-// reads it a trip to the headers, and join failures are the most common wall.
-const char* MeetingStatusName(ZOOM_SDK_NAMESPACE::MeetingStatus s);
-const char* AuthResultName(ZOOM_SDK_NAMESPACE::AuthResult r);
-std::string MeetingFailReason(int code);
 
 }  // namespace zc
