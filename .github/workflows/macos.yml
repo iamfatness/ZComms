@@ -52,16 +52,20 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
-      # Explicit targets, not the default "all" group: zcomms_zoom is now
-      # SDK-gated on this platform too (Task 6's adapter), and the Zoom SDK
-      # is not redistributable, so nothing here may build a target the SDK
-      # can't satisfy. spike_a_tests is named explicitly alongside the other
-      # two -- it needs no SDK and the unfiltered `ctest` below expects it
-      # already built; dropping it from this list makes Test fail with
-      # "Not Run" instead of never running it at all, which is worse: a
-      # target silently rotting unbuilt would report green.
+      # No --target: build the default "all" group. zcomms_zoom and
+      # zcomms_spike_a are now SDK-gated on this platform too (Task 6's
+      # adapter), but the Windows-only "zcomms" app and "zcomms_spike_a"
+      # harness are gated `AND NOT APPLE` in their CMakeLists, so they are
+      # simply absent from the tree here regardless of the SDK being staged
+      # -- the same "SDK-gated targets cost nothing when absent" property
+      # windows.yml's Build step relies on. Building everything CMake knows
+      # how to build means the unfiltered `ctest` below actually finds every
+      # executable it registers, including spike_a_tests: a future test
+      # target added but left unbuilt fails the build step itself instead of
+      # failing invisibly at test time, and can't be masked by an explicit
+      # --target list the way it was before this comment was corrected.
       - name: Build
-        run: cmake --build build --target zcomms_audio_tests zcomms_zoom spike_a_tests
+        run: cmake --build build
 
       - name: Test
         run: ctest --test-dir build --output-on-failure

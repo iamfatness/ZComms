@@ -108,10 +108,11 @@ TalkbackSdkMac::TalkbackSdkMac(void* controller) : controller_(controller) {
   if (controller_ != nullptr) {
     ((__bridge ZoomSDKTalkbackController*)controller_).delegate = d;
   }
-  // Reserved once so id_cache_ never reallocates. The SDK caps a meeting at
-  // 16 simultaneous channels; 64 is headroom against churn over the
-  // adapter's lifetime without ever mattering in the steady state (same
-  // rationale as WidenCached's reserve on Windows).
+  // Headroom, not a correctness requirement: CachedId returns a copied
+  // void*, not a reference into this vector, so a reallocation costs an
+  // extra copy and nothing more. Reserved once anyway so the common case
+  // (SDK caps a meeting at 16 simultaneous channels) never reallocates at
+  // all; 64 covers churn over the adapter's lifetime.
   id_cache_.reserve(64);
 }
 
@@ -129,11 +130,20 @@ TalkbackSdkMac::~TalkbackSdkMac() {
 }
 
 void* TalkbackSdkMac::CachedId(const std::string& channel_id) {
+  // The pacer thread (SendAudio, under TalkbackChannels' send_m_) and the
+  // healer (InviteUsers/RemoveUsers, called after it has already released
+  // its own lock) both reach this vector with no lock shared between them --
+  // id_cache_m_ is the only thing serialising the scan against the
+  // emplace_back below. The returned void* is a copied value, not a
+  // reference into the vector, so it stays valid after the lock is dropped
+  // even if a later call reallocates the backing storage.
+  std::lock_guard<std::mutex> lock(id_cache_m_);
   for (const auto& entry : id_cache_) {
     if (entry.first == channel_id) return entry.second;
   }
-  // capacity is reserved (ctor) so this cannot reallocate and invalidate a
-  // pointer already handed back to an earlier caller.
+  // reserve() in the ctor keeps this from reallocating in the steady state
+  // (headroom, not correctness -- see above, a reallocation here would only
+  // cost an extra copy, never invalidate anything a caller is holding).
   void* retained = (__bridge_retained void*)Ns(channel_id);
   id_cache_.emplace_back(channel_id, retained);
   return retained;

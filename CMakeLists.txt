@@ -130,12 +130,16 @@ endif()
 if(ZCOMMS_SDK_PRESENT)
   # Only the ladder is genuinely shared. room_plan/reach/signal_protocol/
   # signal_outbox/duck_plan are pure (no SDK includes, no windows.h --
-  # verified by grep before this list was trusted). roster.cpp, breakout.cpp,
-  # chat_signals.cpp and jwt.cpp are NOT: they include <windows.h> and/or
-  # <bcrypt.h> and derive straight from ZOOM_SDK_NAMESPACE's C++ interfaces,
-  # which the macOS SDK (an Objective-C framework) has no equivalent of.
-  # Porting those is the next plan's roster/breakout/chat-signal work, not
-  # this task's -- they stay beside zoom_client.cpp in the Windows-only list.
+  # verified by grep before this list was trusted). roster.cpp, breakout.cpp
+  # and chat_signals.cpp are NOT: they derive straight from
+  # ZOOM_SDK_NAMESPACE's Windows C++ interfaces, which the macOS SDK (an
+  # Objective-C framework) has no equivalent of -- porting those is genuine
+  # SDK-surface work for the next plan, not this task's. jwt.cpp is
+  # different in kind, not just unported: it has no SDK types at all, only
+  # <windows.h>/<bcrypt.h> for its HMAC-SHA256 (a CommonCrypto/CC_HMAC swap
+  # would port it in an afternoon) -- it stays Windows-only here purely
+  # because nobody has done that afternoon of work yet, not because the SDK
+  # blocks it. All four stay beside zoom_client.cpp in the Windows-only list.
   add_library(zcomms_zoom STATIC
     src/zoom/talkback_sdk.cpp
     src/zoom/talkback_channels.cpp
@@ -217,8 +221,15 @@ endif()
 
 # ---------------------------------------------------------------------------
 # zcomms -- the talkback panel itself. Phase 1's first vertical slice.
+#
+# NOT APPLE: ZCOMMS_HAVE_SDK went from an implicit "Windows + SDK" to a real
+# per-platform flag when the macOS adapter made it TRUE on Apple too (Task 6).
+# This target's sources (control_server.cpp, zoom_oauth.cpp, crash_trap.cpp,
+# diag_log.cpp) are Windows-only and its POST_BUILD step copies
+# ${ZOOM_SDK_DIR}/bin, a directory the macOS framework layout does not have --
+# both fail outright if this ever builds on Apple with the SDK staged.
 # ---------------------------------------------------------------------------
-if(ZCOMMS_HAVE_SDK)
+if(ZCOMMS_HAVE_SDK AND NOT APPLE)
   add_executable(zcomms src/app/main.cpp src/app/control_server.cpp
                         src/app/zoom_oauth.cpp src/app/crash_trap.cpp
                         src/app/diag_log.cpp src/app/version.rc)

@@ -43,8 +43,12 @@ add_test(NAME spike_a_tests COMMAND spike_a_tests)
 # ---------------------------------------------------------------------------
 # The harness itself. Needs the SDK, which is gitignored and may be absent --
 # a normal state for a fresh clone, not a failure.
+#
+# NOT APPLE: this links zoom_client/talkback_source/jwt (Windows-only, see
+# the root CMakeLists) plus winmm/bcrypt directly, so it cannot build on
+# Apple even now that ZCOMMS_HAVE_SDK can be TRUE there.
 # ---------------------------------------------------------------------------
-if(ZCOMMS_HAVE_SDK)
+if(ZCOMMS_HAVE_SDK AND NOT APPLE)
   # zoom_client, talkback_source and jwt were promoted to src/zoom (the
   # product's zcomms_zoom library); the spike consumes them from there.
   # loopback promoted to src/audio alongside the rest of the device layer.
