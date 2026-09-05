@@ -327,6 +327,7 @@ add_executable(zcomms_audio_tests
   src/zoom/duck_plan.cpp
   src/zoom/talkback_sdk.cpp
   src/zoom/talkback_channels.cpp
+  src/zoom/zoom_client.cpp
 )
 
 # crash_trap/diag_log (and the test that exercises them) are Windows-only:
