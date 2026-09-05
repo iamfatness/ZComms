@@ -33,7 +33,7 @@ void TestEnvelope() {
     ZC_TEST("starts closed and passes nothing");
     Envelope e(12.0, kSampleRate);
     ZC_CHECK(e.silent());
-    ZC_CHECK(!e.open());
+    ZC_CHECK(e.open());  // TEMPORARY: negated to prove the Windows CI gate bites (task 1, step 4)
     auto buf = Dc(100);
     e.Process(buf.data(), 100);
     for (float v : buf) ZC_CHECK_NEAR(v, 0.0, 1e-9);
