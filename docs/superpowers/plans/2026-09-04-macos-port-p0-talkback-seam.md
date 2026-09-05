@@ -60,28 +60,35 @@ The Zoom SDK is gitignored and not redistributable (CLAUDE.md Known Gates), so C
 - Consumes: nothing.
 - Produces: a required status check named `windows` that every later task relies on. No code symbols.
 
-- [ ] **Step 1: Confirm the release asset exists and learn its exact name**
+- [ ] **Step 1: Confirm the release asset (already staged — verify only)**
 
-Run:
-
-```bash
-gh release list --repo iamfatness/ZComms --limit 20
-gh release view <TAG_FROM_ABOVE> --repo iamfatness/ZComms --json assets --jq '.assets[].name'
-```
-
-Record the tag and asset filename. If no SDK asset exists yet, create one from the local tree before continuing:
+The controller created this before execution began. Confirm it is there and unchanged:
 
 ```bash
-cd /path/to/zoom-windows-sdk-parent
-zip -r zoom-sdk-windows.zip zoom-sdk/
-gh release create sdk-assets --repo iamfatness/ZComms --title "SDK assets" \
-  --notes "Non-redistributable Zoom SDKs, fetched by CI. Not for public download." \
-  zoom-sdk-windows.zip
+gh release view sdk-assets --repo iamfatness/ZComms --json isDraft,assets \
+  --jq '{draft: .isDraft, assets: [.assets[].name]}'
 ```
+
+Expected:
+
+```json
+{"draft":true,"assets":["zoom-sdk-windows-7.1.5.43953.zip","zoom-sdk-macos-7.1.5.84750.zip"]}
+```
+
+**`draft` must be `true`.** The Meeting SDK is not redistributable; publishing this release would expose it. If it reads `false`, stop and report — do not continue.
+
+The zips carry a version-named top directory, and the Windows one holds three architecture trees:
+
+```
+zoom-sdk-windows-7.1.5.43953/{x64,x86,arm64}/{bin,demo,h,lib}
+zoom-sdk-macos-7.1.5.84750/ZoomSDK/ZoomSDK.framework
+```
+
+ZComms is x64. **Stage `x64/` explicitly** — CoreVideo shipped a broken Windows release on 2026-08-01 by letting a glob pick an arch tree, and `CMakeLists.txt` only checks that `lib/sdk.lib` exists, not which architecture it is. A wrong-arch `sdk.lib` configures fine and fails at link with unresolved externals.
 
 - [ ] **Step 2: Write the workflow**
 
-Substitute the tag and asset name recorded in Step 1 for `sdk-assets` and `zoom-sdk-windows.zip`.
+Use the tag and asset name confirmed in Step 1 verbatim.
 
 ```yaml
 name: windows
@@ -107,16 +114,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release download sdk-assets --repo ${{ github.repository }} `
-            --pattern zoom-sdk-windows.zip --dir "$env:RUNNER_TEMP"
-          Expand-Archive -Path "$env:RUNNER_TEMP\zoom-sdk-windows.zip" `
+            --pattern zoom-sdk-windows-7.1.5.43953.zip --dir "$env:RUNNER_TEMP"
+          Expand-Archive -Path "$env:RUNNER_TEMP\zoom-sdk-windows-7.1.5.43953.zip" `
             -DestinationPath "$env:RUNNER_TEMP\sdk" -Force
           New-Item -ItemType Directory -Force -Path third_party | Out-Null
-          Move-Item "$env:RUNNER_TEMP\sdk\zoom-sdk" third_party\zoom-sdk
+          # x64 EXPLICITLY. The zip also carries x86 and arm64, and CMake only
+          # checks that lib/sdk.lib exists -- not which architecture it is. A
+          # wrong-arch sdk.lib configures fine and dies at link. CoreVideo
+          # shipped a broken Windows release this exact way on 2026-08-01.
+          Move-Item "$env:RUNNER_TEMP\sdk\zoom-sdk-windows-7.1.5.43953\x64" `
+            third_party\zoom-sdk
 
       - name: Verify the SDK landed
         run: |
           if (-not (Test-Path third_party\zoom-sdk\lib\sdk.lib)) {
             Write-Error "sdk.lib missing -- CMake would silently build engine-only and this gate would prove nothing"
+            exit 1
+          }
+          if (-not (Test-Path third_party\zoom-sdk\h\meeting_service_components\meeting_talkback_ctrl_interface.h)) {
+            Write-Error "talkback header missing -- wrong SDK layout staged"
             exit 1
           }
 
@@ -1626,16 +1642,16 @@ cmake --build build-mac --target zcomms_audio_tests && ./build-mac/zcomms_audio_
 
 Expected: `ALL TESTS PASSED`. The ladder must still build without the SDK — that property is what Task 5's tests depend on, and the CMake edit in Step 4 is the kind of change that can quietly break it.
 
-- [ ] **Step 7: Upload the macOS SDK as a release asset**
+- [ ] **Step 7: Confirm the macOS SDK asset (already staged — verify only)**
 
-macOS CI cannot build `zcomms_zoom` without it. Use the same release Task 1 used.
+The controller uploaded both platforms to the same draft release before execution began, so there is nothing to upload here. Confirm:
 
 ```bash
-cd ~/Developer
-zip -r zoom-sdk-macos.zip zoom-sdk-macos/
-gh release upload sdk-assets zoom-sdk-macos.zip --repo iamfatness/ZComms
-rm zoom-sdk-macos.zip
+gh release view sdk-assets --repo iamfatness/ZComms --json assets \
+  --jq '[.assets[].name] | index("zoom-sdk-macos-7.1.5.84750.zip") != null'
 ```
+
+Expected: `true`. If `false`, stop and report — do not upload an SDK yourself.
 
 - [ ] **Step 8: Extend the macOS workflow to build the adapter**
 
@@ -1647,13 +1663,18 @@ Add these steps to `.github/workflows/macos.yml`, between `checkout` and `Config
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release download sdk-assets --repo ${{ github.repository }} \
-            --pattern zoom-sdk-macos.zip --dir "$RUNNER_TEMP"
-          unzip -q "$RUNNER_TEMP/zoom-sdk-macos.zip" -d "$RUNNER_TEMP/sdk"
+            --pattern zoom-sdk-macos-7.1.5.84750.zip --dir "$RUNNER_TEMP"
+          unzip -q "$RUNNER_TEMP/zoom-sdk-macos-7.1.5.84750.zip" -d "$RUNNER_TEMP/sdk"
           mkdir -p third_party/zoom-sdk
-          cp -R "$RUNNER_TEMP/sdk/zoom-sdk-macos/ZoomSDK.framework" third_party/zoom-sdk/
+          # The framework sits under a ZoomSDK/ subdirectory inside the
+          # version-named top directory -- not at the zip root.
+          cp -R "$RUNNER_TEMP/sdk/zoom-sdk-macos-7.1.5.84750/ZoomSDK/ZoomSDK.framework" \
+            third_party/zoom-sdk/
 
       - name: Verify the SDK landed
-        run: test -d third_party/zoom-sdk/ZoomSDK.framework
+        run: |
+          test -d third_party/zoom-sdk/ZoomSDK.framework
+          test -f third_party/zoom-sdk/ZoomSDK.framework/Versions/A/Headers/ZoomSDKTalkbackController.h
 ```
 
 And change the build step so the adapter is actually compiled:
