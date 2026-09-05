@@ -32,7 +32,7 @@
 #include "talkback_source.h"
 #include "tx_pacer.h"
 #include "wav_sink.h"
-#include "zoom_client.h"
+#include "zoom_client_win.h"
 
 #pragma comment(lib, "winmm.lib")
 
@@ -216,7 +216,7 @@ RunResult RunMeasurement(FrameSink* sink, const Config& cfg, int duration_s,
       zoom->Pump(200);
       if (!zoom->in_meeting()) {
         std::printf("  meeting state changed to %s -- stopping early\n",
-                    MeetingStatusName(zoom->status()));
+                    MeetingStateName(zoom->state()));
         break;
       }
     } else {
@@ -346,7 +346,7 @@ MultiTapResult RunMeasurementMultiTap(FrameSink* sink, const Config& cfg,
       zoom->Pump(200);
       if (!zoom->in_meeting()) {
         std::printf("  meeting state changed to %s -- stopping early\n",
-                    MeetingStatusName(zoom->status()));
+                    MeetingStateName(zoom->state()));
         break;
       }
     } else {
@@ -538,7 +538,7 @@ int DoCheckAuth(const Config& cfg) {
                 "       sdk_secret) in local.env -- see local.env.example.\n");
     return 1;
   }
-  ZoomClient zoom;
+  ZoomClientWin zoom;
   std::string err;
   if (!zoom.Init(&err)) {
     std::printf("ERROR: %s\n", err.c_str());
@@ -567,7 +567,7 @@ int DoMeasure(const Config& cfg) {
               "    3. Its speaker is the device being tapped, and that device\n"
               "       is not muted at the OS level.\n\n");
 
-  ZoomClient zoom;
+  ZoomClientWin zoom;
   std::string err;
   if (!zoom.Init(&err)) {
     std::printf("ERROR: %s\n", err.c_str());
@@ -592,18 +592,19 @@ int DoMeasure(const Config& cfg) {
   std::printf("[sdk] in meeting\n");
 
   // Both transports exist for the run's lifetime; only one is the sink.
-  ZoomMicSourceWin mic;
+  std::unique_ptr<VirtualMic> mic;
   std::unique_ptr<ZoomTalkbackSource> talkback;
   FrameSink* sink = nullptr;
 
   if (cfg.transport == Transport::kVirtualMic) {
-    if (!zoom.InstallVirtualMic(&mic, &err)) {
+    mic = zoom.InstallVirtualMic(&err);
+    if (!mic) {
       std::printf("ERROR: %s\n", err.c_str());
       zoom.Leave();
       zoom.Cleanup();
       return 1;
     }
-    sink = &mic;
+    sink = mic.get();
   } else {
     talkback = std::make_unique<ZoomTalkbackSource>(zoom.GetTalkbackController());
     sink = talkback.get();
@@ -698,18 +699,18 @@ int DoMeasure(const Config& cfg) {
     // never started, and rejoining re-runs that handshake with the mic in
     // place.
     std::printf("[sdk] waiting for the send window to open...\n");
-    for (int i = 0; i < 50 && !mic.CanSend(); ++i) zoom.Pump(100);
+    for (int i = 0; i < 50 && !mic->CanSend(); ++i) zoom.Pump(100);
 
-    if (!mic.CanSend()) {
+    if (!mic->CanSend()) {
       zoom.LogSelfAudioState("after JoinVoip");
       std::printf("[sdk] window shut after 5s -- unmuting self\n");
       if (!zoom.UnmuteSelf(&err)) {
         std::printf("WARNING: %s\n", err.c_str());
       }
-      for (int i = 0; i < 100 && !mic.CanSend(); ++i) zoom.Pump(100);
+      for (int i = 0; i < 100 && !mic->CanSend(); ++i) zoom.Pump(100);
     }
 
-    if (!mic.CanSend()) {
+    if (!mic->CanSend()) {
       zoom.LogSelfAudioState("after unmute");
       std::printf("[sdk] window still shut -- cycling VoIP audio\n");
       if (zoom.LeaveVoip(&err)) {
@@ -720,10 +721,10 @@ int DoMeasure(const Config& cfg) {
       } else {
         std::printf("WARNING: %s\n", err.c_str());
       }
-      for (int i = 0; i < 100 && !mic.CanSend(); ++i) zoom.Pump(100);
+      for (int i = 0; i < 100 && !mic->CanSend(); ++i) zoom.Pump(100);
     }
 
-    if (mic.CanSend()) {
+    if (mic->CanSend()) {
       std::printf("[sdk] send window OPEN -- measuring\n");
     } else {
       zoom.LogSelfAudioState("window never opened");
@@ -767,7 +768,7 @@ int DoMeasure(const Config& cfg) {
                 talkback->last_send_error());
   } else {
     std::printf("  mic send failures %llu (last SDKError %d)\n",
-                (unsigned long long)mic.send_failures(), mic.last_error());
+                (unsigned long long)mic->send_failures(), mic->last_error());
   }
   PrintVerdict(r.summary);
   if (!cfg.csv_path.empty()) WriteCsv(cfg.csv_path, r.samples);

@@ -568,6 +568,10 @@ void ZoomClientWin::onAppSignalPanelUpdated(IMeetingAppSignalHandler*) {}
 
 MeetingState ZoomClientWin::state() const { return ToState(status_.load()); }
 
+IMeetingTalkbackController* ZoomClientWin::GetTalkbackController() {
+  return meeting_ != nullptr ? meeting_->GetMeetingTalkbackController() : nullptr;
+}
+
 IMeetingParticipantsController* ZoomClientWin::GetParticipantsController() {
   return meeting_ != nullptr ? meeting_->GetMeetingParticipantsController()
                              : nullptr;
