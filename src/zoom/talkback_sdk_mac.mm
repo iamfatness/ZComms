@@ -1,5 +1,19 @@
 #include "talkback_sdk_mac.h"
 
+// This file is compiled with -fobjc-arc (CMakeLists.txt, scoped to this one
+// source file). It is a hard requirement, not a preference: the adapter's
+// __bridge_retained/CFRelease pairing (delegate_ and the id cache) only does
+// what it reads as under ARC. Under plain MRC, __bridge_retained silently
+// drops the retain (a warning, not an error), and the cached NSString*s'
+// autorelease gets freed out from under the id cache the moment a pool
+// drains -- silent memory corruption, not a crash at the point of the bug.
+// If this ever compiles outside the CMake target that sets the flag (e.g.
+// added directly to the zcomms target in a later phase), fail loudly here
+// instead of miscompiling quietly.
+#if !__has_feature(objc_arc)
+#error "talkback_sdk_mac.mm requires ARC (-fobjc-arc); see CMakeLists.txt"
+#endif
+
 #import <Foundation/Foundation.h>
 #import <ZoomSDK/ZoomSDK.h>
 

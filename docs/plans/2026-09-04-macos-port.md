@@ -50,6 +50,40 @@ portable, because the platform-specific parts were kept at the edges.
   the single biggest reason this port is cheap: there is no UI framework to
   rewrite, only a host window to replace (§3).
 
+> **Amendment, 2026-09-05, after P0 execution.** The paragraph above is
+> **wrong about "already have unit tests that run without an SDK."** Left as
+> written because it shows what was believed going in versus what execution
+> found — the correction belongs in the record, not as a silent rewrite.
+>
+> `CMakeLists.txt:171-179`, on this branch, puts `roster.cpp`, `breakout.cpp`,
+> `chat_signals.cpp`, and `jwt.cpp` all in the **Windows-only** source list,
+> and none of the four has a test today. They are not one uniform case,
+> though:
+>
+> - `roster.cpp`, `breakout.cpp`, `chat_signals.cpp` are genuinely SDK-bound:
+>   each does `using namespace ZOOM_SDK_NAMESPACE` and is built directly on
+>   the SDK's C++ interface types (`zchar_t`, `IUserInfo`, etc.). Porting
+>   these means writing the same kind of seam §3.3 describes for
+>   `TalkbackSdk` — they are real future work, not a documentation fix.
+> - `jwt.cpp` is different: it has **no SDK types in it at all**. Its only
+>   platform dependency is Windows' BCrypt for HMAC-SHA256
+>   (`BCryptOpenAlgorithmProvider` / `BCryptHashData`, `<bcrypt.h>`). It is in
+>   the Windows-only list purely because of that one crypto call, and porting
+>   it is a CommonCrypto (`CCHmac`/`CC_HMAC`) swap, not a seam.
+>
+> Two more files the original bullet list didn't name are Windows-only for
+> the same reason as `roster`/`breakout`/`chat_signals` — SDK types, not
+> logic that resists porting: `talkback_source.*` and `src/audio/
+> mic_source.cpp` (the header `mic_source.h` is fine; the `.cpp` implements
+> `IZoomSDKVirtualAudioMicEvent`). `loopback.cpp`, covered separately below,
+> is dropped rather than ported.
+>
+> None of this changes §7's phasing — P1 only extracts the `TalkbackSdk`
+> seam — but the next plan that scopes P2/P3 should size `roster`/
+> `breakout`/`chat_signals`/`talkback_source`/`mic_source` as seam-and-port
+> work, and `jwt.cpp` as a much smaller crypto swap, not assume any of the
+> five already has coverage.
+
 **`loopback.cpp` is deliberately excluded from the macOS build.** WASAPI
 loopback has no macOS equivalent without a virtual driver, but it costs nothing
 to drop: `engine.cpp` records that the echo canceller currently runs
@@ -234,6 +268,38 @@ laws that were found live and currently have nothing holding them:
 
 Per house rule, **every new pin is mutation-proved**: break the thing, watch the
 test fail, revert. Tests pin invariants, not implementations.
+
+> **Amendment, 2026-09-05, after P0 execution.** Of the five laws listed
+> above, only one actually got pinned by `tests/zoom/test_talkback_channels.cpp`
+> — and it was pinned **inverted**, as a known bug, not as the behaviour this
+> section describes:
+>
+> - **(a) Law 2 pacing** (~600 ms round-robin membership calls) — **not
+>   pinned**. It lives in `main.cpp:1443-1447` (`next_heal_ns`, `heal_rr`),
+>   inside `Run()`, not in `talkback_channels.cpp`.
+> - **(b) a `TooFrequent` refusal retries the same item, does not advance**
+>   — **not pinned**. Also `main.cpp`, same healer block
+>   (`invite_backoff`, `main.cpp:1608-1675`).
+> - **(c) `AlreadyExists` counts as presence, never retried** — pinned, but
+>   **inverted**: the test (`"ALREADY_EXIST does NOT record presence -- pins
+>   a known bug"`) documents that the code currently does the *opposite* of
+>   what this bullet and `talkback_sdk.h`'s own contract say. Filed as a bug,
+>   not fixed here (fixing it is a behaviour change; this plan was move-only).
+> - **(d) the healer skips cross-room invites** — **not pinned**. The
+>   `same_room` predicate is in `main.cpp:1627`, inside `Run()`.
+> - **(e) duck is unity-at-create, 0.2 only while keyed** — pinned, correctly.
+>   This one lives in `duck_plan.cpp`, which already had test coverage before
+>   this plan.
+>
+> So the seam did **not** make (a), (b), (d) testable — they never moved
+> into `talkback_channels.cpp` in the first place; they live in `Run()`,
+> and §9 rules splitting `Run()` out of scope for this port. Any P1 scoping
+> that assumes "the seam pinned Law 2 pacing / TooFrequent retry / cross-room
+> skip" is scoping against a claim this section made before execution, not
+> against what landed. Pinning those three requires either extracting them
+> from `Run()` (out of scope per §9) or accepting a larger, `Run()`-shaped
+> test surface — a decision for whoever scopes that work next, not a redo of
+> this amendment.
 
 Second-order benefit: once the fakes implement these interfaces rather than
 Zoom's Windows headers, **the suite builds and runs on the Mac** — the machine
