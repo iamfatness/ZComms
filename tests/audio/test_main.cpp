@@ -25,6 +25,7 @@ int main() {
   TestCrashTrap();
 #endif
   TestDiag();
+  TestVirtualMic();
 
   const auto& failures = zctest::Failures();
   std::printf("\n");

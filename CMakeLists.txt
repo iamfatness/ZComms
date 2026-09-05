@@ -318,6 +318,7 @@ add_executable(zcomms_audio_tests
   tests/zoom/test_signal_outbox.cpp
   tests/zoom/test_duck_plan.cpp
   tests/zoom/test_talkback_channels.cpp
+  tests/audio/test_virtual_mic.cpp
   tests/app/test_diag.cpp
   src/zoom/room_plan.cpp
   src/zoom/reach.cpp
