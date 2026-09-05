@@ -1,0 +1,63 @@
+name: windows
+
+on:
+  push:
+    branches: [main, macos-port]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Meeting SDK is not redistributable and is gitignored, so a fresh
+      # clone has none and CMake falls back to "engine only" -- which would
+      # make this gate silently useless: it would compile the audio library,
+      # skip every SDK-dependent target, and report success. Step "verify the
+      # SDK landed" below is what stops that.
+      - name: Fetch the Zoom Windows SDK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download sdk-assets --repo ${{ github.repository }} `
+            --pattern zoom-sdk-windows-7.1.5.43953.zip --dir "$env:RUNNER_TEMP"
+          Expand-Archive -Path "$env:RUNNER_TEMP\zoom-sdk-windows-7.1.5.43953.zip" `
+            -DestinationPath "$env:RUNNER_TEMP\sdk" -Force
+          New-Item -ItemType Directory -Force -Path third_party | Out-Null
+          # x64 EXPLICITLY. The zip also carries x86 and arm64, and CMake only
+          # checks that lib/sdk.lib exists -- not which architecture it is. A
+          # wrong-arch sdk.lib configures fine and dies at link. CoreVideo
+          # shipped a broken Windows release this exact way on 2026-08-01.
+          Move-Item "$env:RUNNER_TEMP\sdk\zoom-sdk-windows-7.1.5.43953\x64" `
+            third_party\zoom-sdk
+
+      - name: Verify the SDK landed
+        run: |
+          if (-not (Test-Path third_party\zoom-sdk\lib\sdk.lib)) {
+            Write-Error "sdk.lib missing -- CMake would silently build engine-only and this gate would prove nothing"
+            exit 1
+          }
+          if (-not (Test-Path third_party\zoom-sdk\h\meeting_service_components\meeting_talkback_ctrl_interface.h)) {
+            Write-Error "talkback header missing -- wrong SDK layout staged"
+            exit 1
+          }
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      # No --target: build the default "all" group. With the SDK staged this
+      # additionally pulls in zcomms, zcomms_zoom and zcomms_spike_a, which do
+      # not exist on the macOS job -- that is the whole point of this gate. An
+      # explicit --target here would let a future SDK-dependent target rot
+      # unbuilt (and therefore untested) with the job still reporting green.
+      - name: Build
+        run: cmake --build build --config Release
+
+      # Unfiltered: an earlier version of the macOS gate built one target and
+      # ran `ctest -R <filter>`, which was rejected in review because a filter
+      # silently skips test targets added later. Both spike_a_tests and
+      # zcomms_audio_tests register via add_test() unconditionally, so a plain
+      # `ctest` finds everything the Build step just produced.
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
