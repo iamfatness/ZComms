@@ -17,13 +17,17 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build tests
-        run: cmake --build build --target zcomms_audio_tests
+      # No --target: build the default "all" group, not just zcomms_audio_tests.
+      # spikes/a-tx-latency registers spike_a_tests via add_test() unconditionally
+      # and needs no SDK either, so it belongs in this job. Building everything
+      # CMake knows how to build (SDK-gated targets are simply absent from the
+      # tree when ZCOMMS_HAVE_SDK is false, so they cost nothing here) means the
+      # unfiltered `ctest` below actually finds every executable it registers --
+      # a future test target added but left unbuilt fails the build step itself
+      # instead of failing invisibly at test time, and can't be masked by a
+      # filter the way an `-R` on this step would mask it.
+      - name: Build
+        run: cmake --build build
 
-      # Scoped to zcomms_audio_tests: `ctest` with no filter also picks up
-      # spike_a_tests (registered by spikes/a-tx-latency's CMakeLists, added
-      # unconditionally), which this job never builds -- an unscoped run
-      # reports "Could not find executable" and exits 8. That harness is a
-      # separate subsystem outside this task's scope.
       - name: Test
-        run: ctest --test-dir build --output-on-failure -R '^zcomms_audio_tests$'
+        run: ctest --test-dir build --output-on-failure
