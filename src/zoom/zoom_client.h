@@ -5,14 +5,16 @@
 // callbacks delivered on a run loop). Neither shape is visible here.
 //
 // WHAT IS DELIBERATELY NOT ON THIS INTERFACE. The Windows class also hands
-// out IMeetingParticipantsController, IMeetingBOController and
-// IMeetingChatController. Those are raw Windows SDK types, and their only
-// consumers -- roster.cpp, breakout.cpp, chat_signals.cpp -- are themselves
-// Windows-only (they derive from ZOOM_SDK_NAMESPACE interfaces; see
-// docs/plans/2026-09-04-macos-port.md section 2's 2026-09-05 amendment).
-// Putting them here would drag the whole Windows SDK across the seam to
-// serve code that cannot run on the other side of it. They stay on
-// ZoomClientWin, fetched once at construction.
+// out FOUR raw Windows SDK getters: IMeetingParticipantsController,
+// IMeetingBOController, IMeetingChatController, and (surviving for spike A's
+// consumer, see zoom_client_win.h) IMeetingTalkbackController via
+// GetTalkbackController(). Their consumers -- roster.cpp, breakout.cpp,
+// chat_signals.cpp, and spikes/a-tx-latency's talkback path -- are
+// themselves Windows-only (the src/zoom trio derives from ZOOM_SDK_NAMESPACE
+// interfaces directly; see docs/plans/2026-09-04-macos-port.md section 2's
+// 2026-09-05 amendment). Putting these here would drag the whole Windows SDK
+// across the seam to serve code that cannot run on the other side of it.
+// They stay on ZoomClientWin, fetched once at construction.
 //
 // Talkback and the virtual mic go the other way: they WERE raw-pointer
 // getters and are now FACTORIES, so each backend builds its own adapter and
@@ -131,6 +133,13 @@ class ZoomClient {
   // The local failure code from the last failed join, or 0. Kept distinct
   // from state(): Zoom's FAILED code gets clobbered by the ENDED that
   // follows it (ENDED carries result 0), so the code is latched.
+  //
+  // Both this and FailReason() return the PLATFORM SDK'S OWN number --
+  // Windows and macOS do not agree on what a given code means, and neither
+  // is comparable to the other. Same convention as VirtualMic::last_error()
+  // and TalkbackSdk's raw SDK code (§3.3 states it for that seam: "the
+  // ladder must never see a raw SDK error code"): carried through for a
+  // human to read or log, never branched on above this seam.
   virtual int last_fail_code() const = 0;
   virtual std::string FailReason(int code) const = 0;
 

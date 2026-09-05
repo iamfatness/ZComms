@@ -177,6 +177,12 @@ stages, zips and produces the NSIS installer.
 native channel count, which is what a feed needs. `zcomms --help` covers
 the headless flags.
 
+After building, `tools/smoke-windows.ps1 -Meeting <id>` is the acceptance
+test for any change that touches how `main.cpp` constructs and joins: it
+joins a real meeting, brings a channel bank up, keys a channel, and asserts
+Zoom actually accepted audio and carried a signal — not just that the build
+succeeded. It needs a machine already signed in to Zoom; see its `.NOTES`.
+
 The panel is also a local control surface: it is served on
 `127.0.0.1:7350` with an SSE state stream and a one-line action API — the
 same seam a Stream Deck / Companion module drives.
