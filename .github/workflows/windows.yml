@@ -7,6 +7,12 @@ on:
 
 jobs:
   build:
+    # Explicit: with no name, both this job and macos.yml's job default to
+    # "build" and produce two check-runs that are indistinguishable in the
+    # GitHub UI and API by name alone -- confirmed live via check-runs on
+    # commit 4be957f, both reporting {"name": "build"}. Whoever later wires
+    # up "require the windows check" needs these to read apart at a glance.
+    name: Windows build & test
     runs-on: windows-latest
     # contents:read (the org default) 404s on a DRAFT release -- the releases
     # API only shows drafts to callers with push access, and a read-scoped
@@ -15,7 +21,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      # persist-credentials: false -- checkout's default leaves a
+      # write-scoped git credential sitting in .git/config for the REST of
+      # the job, not just the fetch step above it. Configure/Build/Test run
+      # a large amount of vendored/third-party code (speexdsp, miniaudio,
+      # the fetched Zoom SDK); none of it needs to push, so the credential
+      # should not be reachable from it.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # The Meeting SDK is not redistributable and is gitignored, so a fresh
       # clone has none and CMake falls back to "engine only" -- which would

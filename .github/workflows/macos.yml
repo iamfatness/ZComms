@@ -7,9 +7,22 @@ on:
 
 jobs:
   build:
+    # Explicit: with no name, both this job and windows.yml's job default to
+    # "build" and produce two check-runs that are indistinguishable in the
+    # GitHub UI and API by name alone -- confirmed live via check-runs on
+    # commit 4be957f, both reporting {"name": "build"}. Whoever later wires
+    # up "require the windows check" needs these to read apart at a glance.
+    name: macOS build & test
     runs-on: macos-14
     steps:
+      # persist-credentials: false -- checkout's default leaves a git
+      # credential sitting in .git/config for the rest of the job. Nothing
+      # after checkout here needs to push, and Configure/Build/Test run a
+      # large amount of vendored/third-party code (speexdsp, miniaudio), so
+      # the credential should not be reachable from it either.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # No Zoom SDK here yet. zcomms_audio_tests links no sdk.lib by design,
       # so the whole suite runs without it. The SDK-dependent targets arrive
