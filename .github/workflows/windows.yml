@@ -8,6 +8,12 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    # contents:read (the org default) 404s on a DRAFT release -- the releases
+    # API only shows drafts to callers with push access, and a read-scoped
+    # GITHUB_TOKEN doesn't qualify. write is still read-only in effect for
+    # what this job does (download one asset); it exists to clear that bar.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
