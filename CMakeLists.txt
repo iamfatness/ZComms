@@ -139,9 +139,13 @@ if(ZCOMMS_SDK_PRESENT)
   # <windows.h>/<bcrypt.h> for its HMAC-SHA256 (a CommonCrypto/CC_HMAC swap
   # would port it in an afternoon) -- it stays Windows-only here purely
   # because nobody has done that afternoon of work yet, not because the SDK
-  # blocks it. All four stay beside zoom_client.cpp in the Windows-only list.
+  # blocks it. All four stay in the Windows-only list below, beside
+  # zoom_client_win.cpp -- the ZoomClient seam's Windows backend, which is
+  # genuine SDK-surface work the same way. zoom_client.cpp itself is now
+  # shared: it is only the seam's MeetingStateName() helper, no SDK types.
   add_library(zcomms_zoom STATIC
     src/zoom/talkback_sdk.cpp
+    src/zoom/zoom_client.cpp
     src/zoom/talkback_channels.cpp
     src/zoom/room_plan.cpp
     src/zoom/reach.cpp
@@ -170,7 +174,7 @@ if(ZCOMMS_SDK_PRESENT)
   else()
     target_sources(zcomms_zoom PRIVATE
       src/audio/mic_source_win.cpp
-      src/zoom/zoom_client.cpp
+      src/zoom/zoom_client_win.cpp
       src/zoom/talkback_source.cpp
       src/zoom/talkback_sdk_win.cpp
       src/zoom/roster.cpp

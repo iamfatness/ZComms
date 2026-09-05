@@ -63,7 +63,7 @@
 #include "talkback_sdk_win.h"
 #include "tx_pacer.h"
 #include "ui_html.h"
-#include "zoom_client.h"
+#include "zoom_client_win.h"
 
 #pragma comment(lib, "winmm.lib")
 
@@ -1148,7 +1148,7 @@ int Run(int argc, char** argv) {
     }
   }
 
-  ZoomClient zoom;
+  ZoomClientWin zoom;
   if (!zoom.Init(&err)) {
     log_op(err + " -- " + SdkConflictHint());
     return -1;
@@ -1169,31 +1169,31 @@ int Run(int argc, char** argv) {
   // The join tick: keep the panel honest while Join blocks, and run the
   // passcode conversation when the meeting demands one the operator didn't
   // paste (bare meeting IDs do this; full invite links carry the passcode).
-  int last_pc_state = 0;
-  ZOOM_SDK_NAMESPACE::MeetingStatus last_js =
-      ZOOM_SDK_NAMESPACE::MEETING_STATUS_IDLE;
+  PasscodeState last_pc_state = PasscodeState::NotAsked;
+  MeetingState last_js = MeetingState::Idle;
   const auto join_tick = [&]() -> bool {
     // Mirror real SDK status to the panel; "ADMIT..." while the SDK sits in
     // WAITING_FOR_HOST reads as a hang from the operator's chair.
-    const ZOOM_SDK_NAMESPACE::MeetingStatus js = zoom.status();
-    if (js != last_js && zoom.passcode_state() == 0) {
+    const MeetingState js = zoom.state();
+    if (js != last_js && zoom.passcode_state() == PasscodeState::NotAsked) {
       last_js = js;
-      if (js == ZOOM_SDK_NAMESPACE::MEETING_STATUS_WAITINGFORHOST) {
+      if (js == MeetingState::WaitingForHost) {
         publish_phase("joining", "WAITING FOR THE HOST TO START THE MEETING");
-      } else if (js == ZOOM_SDK_NAMESPACE::MEETING_STATUS_IN_WAITING_ROOM) {
+      } else if (js == MeetingState::InWaitingRoom) {
         publish_phase("joining", "IN THE WAITING ROOM -- ADMIT \"" +
                                      cfg.display_name + "\"");
-      } else if (js == ZOOM_SDK_NAMESPACE::MEETING_STATUS_RECONNECTING) {
+      } else if (js == MeetingState::Reconnecting) {
         publish_phase("joining", "RECONNECTING...");
       }
     }
-    const int pc = zoom.passcode_state();
-    if (pc != 0 && pc != last_pc_state) {
-      publish_phase("joining", pc == 2 ? "WRONG PASSCODE -- TRY AGAIN"
-                                       : "ENTER THE MEETING PASSCODE");
+    const PasscodeState pc = zoom.passcode_state();
+    if (pc != PasscodeState::NotAsked && pc != last_pc_state) {
+      publish_phase("joining", pc == PasscodeState::WasWrong
+                                    ? "WRONG PASSCODE -- TRY AGAIN"
+                                    : "ENTER THE MEETING PASSCODE");
     }
     last_pc_state = pc;
-    if (pc != 0) {
+    if (pc != PasscodeState::NotAsked) {
       std::string p;
       {
         std::lock_guard<std::mutex> lock(join_m);
@@ -1242,8 +1242,9 @@ int Run(int argc, char** argv) {
   // tier without the raw-data entitlement the callbacks never fire -- the
   // meeting then hears whatever device Zoom captures, and the operator
   // must point Zoom at a dead input; say which world we are in.
-  ZoomMicSourceWin silent_mic;  // deliberately never fed
-  if (zoom.InstallVirtualMic(&silent_mic, &err)) {
+  std::unique_ptr<VirtualMic> silent_mic =  // deliberately never fed
+      zoom.InstallVirtualMic(&err);
+  if (silent_mic) {
     log_op("meeting mic auto-suppressed (open but silent to the room)");
   } else {
     log_op("mic auto-suppress unavailable (" + err +
@@ -1301,8 +1302,7 @@ int Run(int argc, char** argv) {
                               : cfg.channels);
   // The adapter must outlive TalkbackChannels -- it holds the SDK's event
   // registration and forwards into it.
-  auto talkback_sdk =
-      std::make_unique<TalkbackSdkWin>(zoom.GetTalkbackController());
+  auto talkback_sdk = zoom.MakeTalkbackSdk();
   TalkbackChannels bank(talkback_sdk.get());
   if (!bank.meeting_supports_talkback()) {
     log_op("this meeting does not support talkback -- cues via chat");
@@ -1878,7 +1878,7 @@ int Run(int argc, char** argv) {
     }
     if (ui) {
       SetMainPhase("publish panel state");
-      std::string status = MeetingStatusName(zoom.status());
+      std::string status = MeetingStateName(zoom.state());
       for (char& c : status) {
         if (c == '_') c = ' ';
       }
