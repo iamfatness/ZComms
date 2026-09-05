@@ -13,10 +13,6 @@
 // on membership work.
 #pragma once
 
-// clang-format off
-#include <windows.h>
-// clang-format on
-
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -25,7 +21,7 @@
 #include <string>
 #include <vector>
 
-#include "meeting_service_components/meeting_talkback_ctrl_interface.h"
+#include "talkback_sdk.h"
 
 namespace zc {
 
@@ -37,13 +33,12 @@ struct ChannelState {
   std::set<unsigned int> members;  // confirmed joins, by user id
 };
 
-class TalkbackChannels : public ZOOM_SDK_NAMESPACE::IMeetingTalkbackCtrlEvent {
+class TalkbackChannels : public TalkbackSdkEvents {
  public:
   static constexpr int kMaxChannels = 16;  // SDK cap
   static constexpr int kMaxMembers = 10;   // SDK cap per channel
 
-  explicit TalkbackChannels(
-      ZOOM_SDK_NAMESPACE::IMeetingTalkbackController* controller);
+  explicit TalkbackChannels(TalkbackSdk* sdk);
 
   bool meeting_supports_talkback() const;
 
@@ -97,39 +92,36 @@ class TalkbackChannels : public ZOOM_SDK_NAMESPACE::IMeetingTalkbackCtrlEvent {
   uint32_t sent_mask() const { return sent_mask_.load(); }
   std::string last_error() const;
 
-  // IMeetingTalkbackCtrlEvent
-  void onCreateChannelResponse(const zchar_t* channel_id,
-                               TalkbackError error) override;
-  void onDestroyChannelResponse(const zchar_t* channel_id,
-                                TalkbackError error) override;
-  void onChannelUserJoinResponse(const zchar_t* channel_id,
+  // TalkbackSdkEvents
+  void OnCreateChannelResponse(const std::string& channel_id,
+                               TalkbackEvent error) override;
+  void OnDestroyChannelResponse(const std::string& channel_id,
+                                TalkbackEvent error) override;
+  void OnChannelUserJoinResponse(const std::string& channel_id,
                                  unsigned int user_id,
-                                 TalkbackError error) override;
-  void onChannelUserLeaveResponse(const zchar_t* channel_id,
+                                 TalkbackEvent error) override;
+  void OnChannelUserLeaveResponse(const std::string& channel_id,
                                   unsigned int user_id,
-                                  TalkbackError error) override;
-  void onJoinTalkbackChannel(unsigned int inviter_id) override;
-  void onLeaveTalkbackChannel(unsigned int inviter_id) override;
-  void onInviterAudioLevel(unsigned int, unsigned int) override {}
-
-  static const char* ErrorName(TalkbackError e);
+                                  TalkbackEvent error) override;
+  void OnJoinTalkbackChannel(unsigned int inviter_id) override;
+  void OnLeaveTalkbackChannel(unsigned int inviter_id) override;
 
  private:
   int SlotForId(const std::string& id) const;  // -1 if unknown
   void RefreshSendIds();
 
-  ZOOM_SDK_NAMESPACE::IMeetingTalkbackController* controller_;
+  TalkbackSdk* sdk_;
   int want_ = 0;
 
   mutable std::mutex m_;
   std::vector<ChannelState> channels_;
   std::string last_error_;
 
-  // The pacer's view: wide-string ids per slot, refreshed whenever a channel
-  // is created, plus the key mask. Reading a stable snapshot beats taking m_
-  // fifty times a second on the audio path.
+  // The pacer's view: ids per slot, refreshed whenever a channel is created,
+  // plus the key mask. Reading a stable snapshot beats taking m_ fifty times
+  // a second on the audio path.
   std::mutex send_m_;
-  std::array<std::wstring, kMaxChannels> send_ids_;
+  std::array<std::string, kMaxChannels> send_ids_;  // narrow; adapter converts
   std::atomic<uint32_t> ready_mask_{0};
   std::atomic<uint32_t> key_mask_{0};
   std::atomic<uint64_t> send_failures_{0};

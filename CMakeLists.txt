@@ -115,6 +115,8 @@ if(EXISTS "${ZOOM_SDK_DIR}/lib/sdk.lib")
     src/zoom/zoom_client.cpp
     src/zoom/talkback_source.cpp
     src/zoom/talkback_channels.cpp
+    src/zoom/talkback_sdk.cpp
+    src/zoom/talkback_sdk_win.cpp
     src/zoom/roster.cpp
     src/zoom/breakout.cpp
     src/zoom/room_plan.cpp
@@ -264,6 +266,7 @@ add_executable(zcomms_audio_tests
   src/zoom/signal_outbox.cpp
   src/zoom/duck_plan.cpp
   src/zoom/talkback_sdk.cpp
+  src/zoom/talkback_channels.cpp
 )
 
 # crash_trap/diag_log (and the test that exercises them) are Windows-only:

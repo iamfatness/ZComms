@@ -60,6 +60,7 @@
 #include "roster.h"
 #include "signal.h"
 #include "talkback_channels.h"
+#include "talkback_sdk_win.h"
 #include "tx_pacer.h"
 #include "ui_html.h"
 #include "zoom_client.h"
@@ -1298,7 +1299,11 @@ int Run(int argc, char** argv) {
                        : (cfg.channels > TalkbackChannels::kMaxChannels
                               ? TalkbackChannels::kMaxChannels
                               : cfg.channels);
-  TalkbackChannels bank(zoom.GetTalkbackController());
+  // The adapter must outlive TalkbackChannels -- it holds the SDK's event
+  // registration and forwards into it.
+  auto talkback_sdk =
+      std::make_unique<TalkbackSdkWin>(zoom.GetTalkbackController());
+  TalkbackChannels bank(talkback_sdk.get());
   if (!bank.meeting_supports_talkback()) {
     log_op("this meeting does not support talkback -- cues via chat");
     // Requirement: when talkback is unavailable, chat becomes the cue
