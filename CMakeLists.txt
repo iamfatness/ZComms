@@ -108,28 +108,75 @@ endif()
 # ---------------------------------------------------------------------------
 # zcomms_zoom -- the Meeting SDK binding. Optional: the SDK is not
 # redistributable and is gitignored (plan §3.5), so a fresh clone has none.
+#
+# A plain boolean, not a deferred `EXISTS <path>` list. The
+# `set(VAR EXISTS path)` + `if(${VAR})` idiom does expand correctly, but it
+# reads as a bug and breaks the moment anyone quotes the variable.
 # ---------------------------------------------------------------------------
-if(EXISTS "${ZOOM_SDK_DIR}/lib/sdk.lib")
+if(APPLE)
+  if(EXISTS "${ZOOM_SDK_DIR}/ZoomSDK.framework")
+    set(ZCOMMS_SDK_PRESENT TRUE)
+  else()
+    set(ZCOMMS_SDK_PRESENT FALSE)
+  endif()
+else()
+  if(EXISTS "${ZOOM_SDK_DIR}/lib/sdk.lib")
+    set(ZCOMMS_SDK_PRESENT TRUE)
+  else()
+    set(ZCOMMS_SDK_PRESENT FALSE)
+  endif()
+endif()
+
+if(ZCOMMS_SDK_PRESENT)
+  # Only the ladder is genuinely shared. room_plan/reach/signal_protocol/
+  # signal_outbox/duck_plan are pure (no SDK includes, no windows.h --
+  # verified by grep before this list was trusted). roster.cpp, breakout.cpp,
+  # chat_signals.cpp and jwt.cpp are NOT: they include <windows.h> and/or
+  # <bcrypt.h> and derive straight from ZOOM_SDK_NAMESPACE's C++ interfaces,
+  # which the macOS SDK (an Objective-C framework) has no equivalent of.
+  # Porting those is the next plan's roster/breakout/chat-signal work, not
+  # this task's -- they stay beside zoom_client.cpp in the Windows-only list.
   add_library(zcomms_zoom STATIC
-    src/audio/mic_source.cpp
-    src/zoom/zoom_client.cpp
-    src/zoom/talkback_source.cpp
-    src/zoom/talkback_channels.cpp
     src/zoom/talkback_sdk.cpp
-    src/zoom/talkback_sdk_win.cpp
-    src/zoom/roster.cpp
-    src/zoom/breakout.cpp
+    src/zoom/talkback_channels.cpp
     src/zoom/room_plan.cpp
     src/zoom/reach.cpp
     src/zoom/signal_protocol.cpp
     src/zoom/signal_outbox.cpp
-    src/zoom/chat_signals.cpp
     src/zoom/duck_plan.cpp
-    src/zoom/jwt.cpp
   )
-  target_link_libraries(zcomms_zoom PUBLIC zcomms_audio "${ZOOM_SDK_DIR}/lib/sdk.lib")
-  target_link_libraries(zcomms_zoom PRIVATE bcrypt)
-  target_include_directories(zcomms_zoom PUBLIC "${ZOOM_SDK_DIR}/h" src/zoom)
+  if(APPLE)
+    target_sources(zcomms_zoom PRIVATE src/zoom/talkback_sdk_mac.mm)
+    # -F is needed on BOTH the compile line (so `#import <ZoomSDK/ZoomSDK.h>`
+    # resolves as a framework header) and the link line (so the linker finds
+    # the framework binary) -- target_link_libraries's copy alone leaves the
+    # compiler unable to find the header at all.
+    target_compile_options(zcomms_zoom PRIVATE "-F${ZOOM_SDK_DIR}")
+    target_link_libraries(zcomms_zoom PUBLIC zcomms_audio
+      "-framework Foundation" "-F${ZOOM_SDK_DIR}" "-framework ZoomSDK")
+    target_include_directories(zcomms_zoom PUBLIC src/zoom)
+    # ARC, scoped to this one file. The adapter's __bridge_retained/CFRelease
+    # pairing (delegate_ and the id cache) only does what it reads as under
+    # ARC -- under plain MRC, __bridge_retained silently drops the retain
+    # (a warning, not an error) and stringWithUTF8String:'s autoreleased
+    # NSString would be freed out from under the cache the moment a pool
+    # drains.
+    set_source_files_properties(src/zoom/talkback_sdk_mac.mm PROPERTIES
+      COMPILE_OPTIONS "-fobjc-arc")
+  else()
+    target_sources(zcomms_zoom PRIVATE
+      src/audio/mic_source.cpp
+      src/zoom/zoom_client.cpp
+      src/zoom/talkback_source.cpp
+      src/zoom/talkback_sdk_win.cpp
+      src/zoom/roster.cpp
+      src/zoom/breakout.cpp
+      src/zoom/chat_signals.cpp
+      src/zoom/jwt.cpp)
+    target_link_libraries(zcomms_zoom PUBLIC zcomms_audio "${ZOOM_SDK_DIR}/lib/sdk.lib")
+    target_link_libraries(zcomms_zoom PRIVATE bcrypt)
+    target_include_directories(zcomms_zoom PUBLIC "${ZOOM_SDK_DIR}/h" src/zoom)
+  endif()
   if(MSVC)
     target_compile_options(zcomms_zoom PRIVATE /W3 /utf-8)
   endif()
