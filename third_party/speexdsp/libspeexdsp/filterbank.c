@@ -46,7 +46,7 @@
 #define toBARK(n)   (MULT16_16(26829,spx_atan(SHR32(MULT16_16(97,n),2))) + MULT16_16(4588,spx_atan(MULT16_32_Q15(20,MULT16_16(n,n)))) + MULT16_16(3355,n))
 
 #else
-#define toBARK(n)   (13.1f*atan(.00074f*(n))+2.24f*atan((n)*(n)*1.85e-8f)+1e-4f*(n))
+#define toBARK(n)   (13.1f*atan(.00074f*(n))+2.24f*atan(((float)(n))*(n)*1.85e-8f)+1e-4f*(n))
 #endif
 
 #define toMEL(n)    (2595.f*log10(1.f+(n)/700.f))
