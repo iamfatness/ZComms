@@ -9,6 +9,12 @@ void TestVirtualMic() {
     // Zoom hands the sender over in onMicInitialize. Before that there is
     // nothing to send into, and the pacer must be told so rather than
     // discovering it by dereferencing null on the 20 ms tick.
+    //
+    // This pins the fresh-mic state, where CanSend()/Send() are false
+    // because can_send_ defaults false -- it does NOT isolate the
+    // have_sender_ guard specifically (can_send_ is false here too, so
+    // either check alone would gate this call). That half is proven by
+    // "onMicStartSend before onMicInitialize is still refused" below.
     FakeVirtualMic mic;
     const int16_t pcm[160] = {0};
     ZC_CHECK(!mic.CanSend());
@@ -53,6 +59,14 @@ void TestVirtualMic() {
     // passed CanSend() must find a closed gate rather than a revoked
     // pointer -- that failure is a crash, not a glitch, and a 20 ms cadence
     // finds it quickly.
+    //
+    // This isolates the have_sender_/initialised_ half of the revocation:
+    // both post-Uninitialize checks below hold even if can_send_ were left
+    // stuck true (mutation-confirmed). The can_send_ half of the same
+    // revocation is what "re-initialising reopens the mic from a clean
+    // state" below actually catches, by re-arming have_sender_ without an
+    // intervening StartSend() and observing whether a stale can_send_
+    // leaks through.
     FakeVirtualMic mic;
     const int16_t pcm[160] = {0};
     mic.Initialize();
@@ -97,5 +111,22 @@ void TestVirtualMic() {
     ZC_CHECK(!mic.Send(pcm, 160));
     mic.StartSend();
     ZC_CHECK(mic.Send(pcm, 160));
+  }
+
+  ZC_TEST("onMicStartSend before onMicInitialize is still refused");
+  {
+    // The documented lifecycle never calls onMicStartSend before
+    // onMicInitialize -- under it, can_send_ is never true while
+    // have_sender_ is false, so Send()'s "!have_sender_" half of the guard
+    // is otherwise unreachable by any legal call sequence, and untested by
+    // every other test above. This project does not trust the Zoom SDK to
+    // honour its own documented order, so the guard defends the
+    // out-of-contract case directly: a "sender" flag with nothing behind
+    // it must still refuse, not accept because the window looks open.
+    FakeVirtualMic mic;
+    const int16_t pcm[160] = {0};
+    mic.StartSend();
+    ZC_CHECK(!mic.Send(pcm, 160));
+    ZC_CHECK(mic.accepted.empty());
   }
 }
