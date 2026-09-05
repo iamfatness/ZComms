@@ -31,6 +31,15 @@ TalkbackCall FromSdkError(SDKError err) {
   }
 }
 
+// Carries the raw SDKError alongside the normalised TalkbackCall. Distinct
+// production codes collapse onto TalkbackCall::Failed above (e.g.
+// SDKERR_NO_PERMISSION == 12 and SDKERR_INVALID_PARAMETER == 3 are both
+// "Failed") -- raw is what lets an operator-facing message still name the
+// one production actually hit, without the ladder ever branching on it.
+TalkbackResult ToResult(SDKError err) {
+  return TalkbackResult(FromSdkError(err), static_cast<int>(err));
+}
+
 TalkbackEvent FromTalkbackError(
     IMeetingTalkbackCtrlEvent::TalkbackError e) {
   switch (e) {
@@ -55,6 +64,12 @@ TalkbackEvent FromTalkbackError(
 
 TalkbackSdkWin::TalkbackSdkWin(IMeetingTalkbackController* controller)
     : controller_(controller) {
+  // See the header: reserved once so the cache never reallocates. The SDK
+  // caps a meeting at 16 SIMULTANEOUS channels, but DestroyChannels (never
+  // called today, kept only for interface completeness) could in principle
+  // churn through more distinct ids over the object's lifetime -- 64 is
+  // headroom against that without ever mattering in the steady state.
+  widen_cache_.reserve(64);
   if (controller_ != nullptr) controller_->SetEvent(this);
 }
 
@@ -64,38 +79,49 @@ bool TalkbackSdkWin::MeetingSupportsTalkback() {
   return controller_ != nullptr && controller_->IsMeetingSupportTalkBack();
 }
 
-TalkbackCall TalkbackSdkWin::CreateChannels(unsigned int count) {
-  if (controller_ == nullptr) return TalkbackCall::NoController;
-  return FromSdkError(controller_->CreateChannel(count));
+const std::wstring& TalkbackSdkWin::WidenCached(const std::string& id) {
+  std::lock_guard<std::mutex> lock(widen_cache_m_);
+  for (const auto& entry : widen_cache_) {
+    if (entry.first == id) return entry.second;
+  }
+  // capacity is reserved (ctor) so this cannot reallocate and invalidate
+  // a reference returned to a caller that already released the lock.
+  widen_cache_.emplace_back(id, Widen(id));
+  return widen_cache_.back().second;
 }
 
-TalkbackCall TalkbackSdkWin::InviteUsers(
+TalkbackResult TalkbackSdkWin::CreateChannels(unsigned int count) {
+  if (controller_ == nullptr) return TalkbackCall::NoController;
+  return ToResult(controller_->CreateChannel(count));
+}
+
+TalkbackResult TalkbackSdkWin::InviteUsers(
     const std::string& channel_id, const std::vector<unsigned int>& user_ids) {
   if (controller_ == nullptr) return TalkbackCall::NoController;
   if (user_ids.empty()) return TalkbackCall::Ok;
-  const std::wstring idw = Widen(channel_id);
+  const std::wstring& idw = WidenCached(channel_id);
   SDKError err = controller_->BeginBatchInviteUsers(idw.c_str());
   for (size_t i = 0; i < user_ids.size() && err == SDKERR_SUCCESS; ++i) {
     err = controller_->AddUserToInvite(user_ids[i]);
   }
   if (err == SDKERR_SUCCESS) err = controller_->ExecuteBatchInviteUsers();
-  return FromSdkError(err);
+  return ToResult(err);
 }
 
-TalkbackCall TalkbackSdkWin::RemoveUsers(
+TalkbackResult TalkbackSdkWin::RemoveUsers(
     const std::string& channel_id, const std::vector<unsigned int>& user_ids) {
   if (controller_ == nullptr) return TalkbackCall::NoController;
   if (user_ids.empty()) return TalkbackCall::Ok;
-  const std::wstring idw = Widen(channel_id);
+  const std::wstring& idw = WidenCached(channel_id);
   SDKError err = controller_->BeginBatchRemoveUsers(idw.c_str());
   for (size_t i = 0; i < user_ids.size() && err == SDKERR_SUCCESS; ++i) {
     err = controller_->AddUserToRemove(user_ids[i]);
   }
   if (err == SDKERR_SUCCESS) err = controller_->ExecuteBatchRemoveUsers();
-  return FromSdkError(err);
+  return ToResult(err);
 }
 
-TalkbackCall TalkbackSdkWin::DestroyChannels(
+TalkbackResult TalkbackSdkWin::DestroyChannels(
     const std::vector<std::string>& channel_ids) {
   if (controller_ == nullptr) return TalkbackCall::NoController;
   if (channel_ids.empty()) return TalkbackCall::Ok;
@@ -107,28 +133,28 @@ TalkbackCall TalkbackSdkWin::DestroyChannels(
   // never torn down), so it is unexercised in production either way.
   SDKError err = controller_->BeginBatchDestroyChannels();
   for (size_t i = 0; i < channel_ids.size() && err == SDKERR_SUCCESS; ++i) {
-    const std::wstring idw = Widen(channel_ids[i]);
+    const std::wstring& idw = WidenCached(channel_ids[i]);
     err = controller_->AddChannelToDestroy(idw.c_str());
   }
   if (err == SDKERR_SUCCESS) err = controller_->ExecuteBatchDestroyChannels();
-  return FromSdkError(err);
+  return ToResult(err);
 }
 
-TalkbackCall TalkbackSdkWin::SendAudio(const std::string& channel_id,
-                                       const int16_t* pcm, int samples) {
+TalkbackResult TalkbackSdkWin::SendAudio(const std::string& channel_id,
+                                         const int16_t* pcm, int samples) {
   if (controller_ == nullptr) return TalkbackCall::NoController;
-  const std::wstring idw = Widen(channel_id);
-  return FromSdkError(controller_->SendAudioDataToChannel(
+  const std::wstring& idw = WidenCached(channel_id);
+  return ToResult(controller_->SendAudioDataToChannel(
       idw.c_str(), reinterpret_cast<const char*>(pcm),
       static_cast<unsigned int>(samples * static_cast<int>(sizeof(int16_t))),
       kSampleRate, ZoomSDKAudioChannel_Mono));
 }
 
-TalkbackCall TalkbackSdkWin::SetChannelBackgroundVolume(
+TalkbackResult TalkbackSdkWin::SetChannelBackgroundVolume(
     const std::string& channel_id, float volume) {
   if (controller_ == nullptr) return TalkbackCall::NoController;
-  const std::wstring idw = Widen(channel_id);
-  return FromSdkError(
+  const std::wstring& idw = WidenCached(channel_id);
+  return ToResult(
       controller_->SetChannelBackgroundVolume(idw.c_str(), volume));
 }
 

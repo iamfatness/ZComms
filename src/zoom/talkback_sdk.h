@@ -32,6 +32,41 @@ enum class TalkbackCall {
   Failed,        // Anything else. Never silently retried.
 };
 
+// TalkbackCall plus the platform SDK's OWN error number, carried alongside
+// for humans only -- `code` is what the ladder branches on and compares;
+// `raw` is never compared or switched on above the seam, only printed. The
+// collapse into four TalkbackCall values loses exactly the distinction an
+// operator needs: Windows SDKERR_NO_PERMISSION (12, "you need to be host")
+// and SDKERR_INVALID_PARAMETER (3, "that person is on the web client") both
+// land on TalkbackCall::Failed, and those are the two codes production
+// actually hits. Each adapter fills `raw` from its own number space --
+// Windows SDKError, macOS ZoomSDKError -- so raw values are NOT comparable
+// across platforms and are meaningless without knowing which adapter made
+// the call; only `code` carries cross-platform meaning.
+struct TalkbackResult {
+  TalkbackCall code;
+  int raw;
+
+  // Implicit on purpose: every existing `return TalkbackCall::X;` site
+  // becomes a valid TalkbackResult with raw=0, so call sites that never
+  // had a raw code (NoController, empty-list short-circuits) need no edit.
+  TalkbackResult(TalkbackCall c = TalkbackCall::Ok, int r = 0)
+      : code(c), raw(r) {}
+
+  friend bool operator==(const TalkbackResult& a, TalkbackCall c) {
+    return a.code == c;
+  }
+  friend bool operator==(TalkbackCall c, const TalkbackResult& a) {
+    return a.code == c;
+  }
+  friend bool operator!=(const TalkbackResult& a, TalkbackCall c) {
+    return a.code != c;
+  }
+  friend bool operator!=(TalkbackCall c, const TalkbackResult& a) {
+    return a.code != c;
+  }
+};
+
 // The ASYNCHRONOUS outcome, delivered to TalkbackSdkEvents.
 enum class TalkbackEvent {
   Ok,
@@ -75,28 +110,30 @@ class TalkbackSdk {
   // Asks for `count` channels in ONE call. CreateChannel is rate-limited
   // (found live by the CoreVideo talkback work), so N channels are never
   // requested as N calls.
-  virtual TalkbackCall CreateChannels(unsigned int count) = 0;
+  virtual TalkbackResult CreateChannels(unsigned int count) = 0;
 
-  virtual TalkbackCall InviteUsers(const std::string& channel_id,
-                                   const std::vector<unsigned int>& user_ids) = 0;
-  virtual TalkbackCall RemoveUsers(const std::string& channel_id,
-                                   const std::vector<unsigned int>& user_ids) = 0;
-  virtual TalkbackCall DestroyChannels(
+  virtual TalkbackResult InviteUsers(
+      const std::string& channel_id,
+      const std::vector<unsigned int>& user_ids) = 0;
+  virtual TalkbackResult RemoveUsers(
+      const std::string& channel_id,
+      const std::vector<unsigned int>& user_ids) = 0;
+  virtual TalkbackResult DestroyChannels(
       const std::vector<std::string>& channel_ids) = 0;
 
   // One mono frame at the engine's sample rate. There is deliberately NO
   // channel-count parameter: ZoomSDKAudioChannel_Stereo returns success and
   // delivers NOTHING audible (CLAUDE.md Law 5, found live). Each adapter
   // hardcodes mono, so the law cannot be broken from above this line.
-  virtual TalkbackCall SendAudio(const std::string& channel_id,
-                                 const int16_t* pcm, int samples) = 0;
+  virtual TalkbackResult SendAudio(const std::string& channel_id,
+                                   const int16_t* pcm, int samples) = 0;
 
   // Channel-scoped meeting-audio gain, 0.0-2.0, 1.0 = unity. Zoom ducks
   // channel members BY DEFAULT, so unity is applied at creation and ducking
   // reserved for while the channel is keyed; DuckPlanner owns that policy,
   // this is only the call.
-  virtual TalkbackCall SetChannelBackgroundVolume(const std::string& channel_id,
-                                                  float volume) = 0;
+  virtual TalkbackResult SetChannelBackgroundVolume(
+      const std::string& channel_id, float volume) = 0;
 };
 
 }  // namespace zc

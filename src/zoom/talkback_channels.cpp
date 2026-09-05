@@ -5,6 +5,20 @@
 #include "audio_defs.h"
 
 namespace zc {
+namespace {
+
+// r.code is what every caller below branches on; r.raw is appended so the
+// ops line still names the exact platform code a real incident hit (e.g.
+// Windows SDKERR_NO_PERMISSION == 12, "you need to be host";
+// SDKERR_INVALID_PARAMETER == 3, "that person is on the web client") --
+// both collapse to TalkbackCall::Failed and were unrecoverable from `code`
+// alone.
+std::string Describe(const TalkbackResult& r) {
+  return std::string(TalkbackCallName(r.code)) + " (sdk " +
+         std::to_string(r.raw) + ")";
+}
+
+}  // namespace
 
 TalkbackChannels::TalkbackChannels(TalkbackSdk* sdk) : sdk_(sdk) {
   if (sdk_ != nullptr) sdk_->SetEvents(this);
@@ -34,9 +48,10 @@ bool TalkbackChannels::CreateChannels(int count, std::string* error) {
   // One call for the lot. CreateChannel is known to be rate-limited (found
   // live by the CoreVideo talkback work), so N channels are requested as one
   // batch rather than N calls.
-  const TalkbackCall r = sdk_->CreateChannels(static_cast<unsigned int>(count));
+  const TalkbackResult r =
+      sdk_->CreateChannels(static_cast<unsigned int>(count));
   if (r != TalkbackCall::Ok) {
-    *error = std::string("CreateChannel failed: ") + TalkbackCallName(r);
+    *error = "CreateChannel failed: " + Describe(r);
     return false;
   }
   return true;
@@ -86,9 +101,9 @@ bool TalkbackChannels::Invite(int slot, unsigned int user_id,
     }
     id = channels_[static_cast<size_t>(slot)].id;
   }
-  const TalkbackCall r = sdk_->InviteUsers(id, {user_id});
+  const TalkbackResult r = sdk_->InviteUsers(id, {user_id});
   if (r != TalkbackCall::Ok) {
-    *error = std::string("invite failed: ") + TalkbackCallName(r);
+    *error = "invite failed: " + Describe(r);
     return false;
   }
   return true;
@@ -113,9 +128,9 @@ bool TalkbackChannels::InviteMany(int slot,
     }
     id = channels_[static_cast<size_t>(slot)].id;
   }
-  const TalkbackCall r = sdk_->InviteUsers(id, user_ids);
+  const TalkbackResult r = sdk_->InviteUsers(id, user_ids);
   if (r != TalkbackCall::Ok) {
-    *error = TalkbackCallName(r);
+    *error = Describe(r);
     return false;
   }
   return true;
@@ -132,9 +147,9 @@ bool TalkbackChannels::Remove(int slot, unsigned int user_id,
     }
     id = channels_[static_cast<size_t>(slot)].id;
   }
-  const TalkbackCall r = sdk_->RemoveUsers(id, {user_id});
+  const TalkbackResult r = sdk_->RemoveUsers(id, {user_id});
   if (r != TalkbackCall::Ok) {
-    *error = std::string("remove failed: ") + TalkbackCallName(r);
+    *error = "remove failed: " + Describe(r);
     return false;
   }
   return true;
@@ -168,7 +183,7 @@ bool TalkbackChannels::SendToSlot(int slot, const int16_t* pcm, int samples) {
   if (((ready_mask_.load() >> slot) & 1u) == 0) return false;
   std::lock_guard<std::mutex> lock(send_m_);
   // Mono only -- law #5, same as SendToKeyed below.
-  const TalkbackCall r =
+  const TalkbackResult r =
       sdk_->SendAudio(send_ids_[static_cast<size_t>(slot)], pcm, samples);
   if (r != TalkbackCall::Ok) {
     send_failures_.fetch_add(1);
@@ -190,7 +205,7 @@ int TalkbackChannels::SendToKeyed(const int16_t* pcm, int samples) {
     // delivers NOTHING audible (CoreVideo, live). A stereo source must be
     // downmixed before this boundary; the seam hardcodes mono so the law
     // cannot be broken from here.
-    const TalkbackCall r =
+    const TalkbackResult r =
         sdk_->SendAudio(send_ids_[static_cast<size_t>(i)], pcm, samples);
     if (r == TalkbackCall::Ok) {
       ++sent;
