@@ -944,8 +944,16 @@ Expected: `windows` GREEN (behaviour unchanged) and `macos` GREEN (ladder now bu
 - Modify: `tests/audio/test_util.h`, `tests/audio/test_main.cpp`, `CMakeLists.txt`
 
 **Interfaces:**
-- Consumes: `zc::TalkbackSdk`, `zc::TalkbackCall`, `zc::TalkbackEvent`, `zc::TalkbackChannels`.
+- Consumes: `zc::TalkbackSdk`, `zc::TalkbackResult`, `zc::TalkbackCall`, `zc::TalkbackEvent`, `zc::TalkbackChannels`.
 - Produces: `zctest::FakeTalkbackSdk`, `void TestTalkbackChannels()`.
+
+**Amendments from Task 4's review — read before writing any test:**
+
+1. **The seam returns `TalkbackResult`, not `TalkbackCall`.** Task 4 added a raw platform error code alongside the normalised enum, so the six operation methods now return `struct TalkbackResult { TalkbackCall code; int raw; }`. It has an implicit constructor from `TalkbackCall` and `==`/`!=` against `TalkbackCall`, so `next_result = TalkbackCall::TooFrequent` and `return next_result;` both still work — but the fake's **override return types must say `zc::TalkbackResult`** or they will not compile as overrides. The code below already reflects this.
+
+2. **A null `TalkbackSdk*` is not the old null-controller case.** Task 4 substituted `controller_ == nullptr` for `sdk_ == nullptr`, and `sdk_` is never null in the app. These paths were unreachable before and become reachable here the moment a fake returns `NoController`: `CreateChannels` will mutate `want_` and resize `channels_` *before* failing, and `SendToSlot`/`SendToKeyed` will take `send_m_` and increment `send_failures_` per keyed slot per tick where the original left it at zero. **Do not write a test that assumes the pre-refactor behaviour on these paths** — if you test them at all, pin what the code does now and say in the comment that it differs from the original.
+
+3. **`AlreadyExists` does not record presence.** See the test below — it pins a known bug rather than the intended contract, by owner ruling. Do not "fix" it while writing the test.
 
 - [ ] **Step 1: Write the fake**
 
@@ -981,7 +989,7 @@ class FakeTalkbackSdk : public zc::TalkbackSdk {
   void SetEvents(zc::TalkbackSdkEvents* events) override { events_ = events; }
   bool MeetingSupportsTalkback() override { return supports; }
 
-  zc::TalkbackCall CreateChannels(unsigned int count) override {
+  zc::TalkbackResult CreateChannels(unsigned int count) override {
     FakeCall c;
     c.op = "create";
     c.user_ids.push_back(count);
@@ -989,21 +997,21 @@ class FakeTalkbackSdk : public zc::TalkbackSdk {
     return next_result;
   }
 
-  zc::TalkbackCall InviteUsers(
+  zc::TalkbackResult InviteUsers(
       const std::string& channel_id,
       const std::vector<unsigned int>& user_ids) override {
     calls.push_back({"invite", channel_id, user_ids, 0.0f});
     return next_result;
   }
 
-  zc::TalkbackCall RemoveUsers(
+  zc::TalkbackResult RemoveUsers(
       const std::string& channel_id,
       const std::vector<unsigned int>& user_ids) override {
     calls.push_back({"remove", channel_id, user_ids, 0.0f});
     return next_result;
   }
 
-  zc::TalkbackCall DestroyChannels(
+  zc::TalkbackResult DestroyChannels(
       const std::vector<std::string>& channel_ids) override {
     for (const std::string& id : channel_ids) {
       calls.push_back({"destroy", id, {}, 0.0f});
@@ -1011,7 +1019,7 @@ class FakeTalkbackSdk : public zc::TalkbackSdk {
     return next_result;
   }
 
-  zc::TalkbackCall SendAudio(const std::string& channel_id, const int16_t*,
+  zc::TalkbackResult SendAudio(const std::string& channel_id, const int16_t*,
                              int samples) override {
     FakeCall c;
     c.op = "send";
@@ -1021,7 +1029,7 @@ class FakeTalkbackSdk : public zc::TalkbackSdk {
     return next_result;
   }
 
-  zc::TalkbackCall SetChannelBackgroundVolume(const std::string& channel_id,
+  zc::TalkbackResult SetChannelBackgroundVolume(const std::string& channel_id,
                                               float volume) override {
     calls.push_back({"volume", channel_id, {}, volume});
     return next_result;
@@ -1157,14 +1165,27 @@ void TestTalkbackChannels() {
     ZC_CHECK(ch.Snapshot()[0].members.count(101) == 1u);
   }
 
-  ZC_TEST("ALREADY_EXIST counts as presence, not as a failure");
+  ZC_TEST("ALREADY_EXIST does NOT record presence -- pins a known bug");
   {
-    // Retrying an AlreadyExists forever is a loop the healer must not enter.
+    // This pins what the code DOES, which is not what it should do.
+    //
+    // A member is recorded only on TalkbackEvent::Ok; every other response
+    // just sets last_error_. So when Zoom answers an invite with
+    // ALREADY_EXIST -- meaning the person IS in the channel -- the ladder
+    // does not record them, `want && !have` stays true, and the healer
+    // re-invites the same person every 5-60s for the life of the session,
+    // spending the rate-limit budget that Law 2 exists to protect.
+    //
+    // It contradicts talkback_sdk.h's own contract ("Confirmed presence.
+    // NEVER retried"). Fixing it is a BEHAVIOUR change and this plan is a
+    // move-only port, so the fix is filed separately and needs its own live
+    // verification. Owner ruling 2026-09-05: pin reality, file the bug.
+    // When that fix lands, this test inverts to == 1u and the comment goes.
     FakeTalkbackSdk fake;
     TalkbackChannels ch(&fake);
     BringUp(&fake, &ch, 1);
     fake.EmitUserJoined("guid-0", 101, TalkbackEvent::AlreadyExists);
-    ZC_CHECK(ch.Snapshot()[0].members.count(101) == 1u);
+    ZC_CHECK(ch.Snapshot()[0].members.count(101) == 0u);
   }
 
   ZC_TEST("audio goes ONLY to keyed, ready channels");
