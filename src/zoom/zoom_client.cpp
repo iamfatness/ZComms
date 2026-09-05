@@ -392,7 +392,7 @@ bool ZoomClient::UnmuteSelf(std::string* error) {
   return true;
 }
 
-bool ZoomClient::InstallVirtualMic(ZoomMicSource* source, std::string* error) {
+bool ZoomClient::InstallVirtualMic(ZoomMicSourceWin* source, std::string* error) {
   if (!HasRawdataLicense()) {
     // Worth checking explicitly. Without the raw-data entitlement the calls
     // below can succeed and simply never fire a callback, which looks like a

@@ -1242,7 +1242,7 @@ int Run(int argc, char** argv) {
   // tier without the raw-data entitlement the callbacks never fire -- the
   // meeting then hears whatever device Zoom captures, and the operator
   // must point Zoom at a dead input; say which world we are in.
-  ZoomMicSource silent_mic;  // deliberately never fed
+  ZoomMicSourceWin silent_mic;  // deliberately never fed
   if (zoom.InstallVirtualMic(&silent_mic, &err)) {
     log_op("meeting mic auto-suppressed (open but silent to the room)");
   } else {
