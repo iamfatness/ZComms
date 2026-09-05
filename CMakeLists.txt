@@ -169,7 +169,7 @@ if(ZCOMMS_SDK_PRESENT)
       COMPILE_OPTIONS "-fobjc-arc")
   else()
     target_sources(zcomms_zoom PRIVATE
-      src/audio/mic_source.cpp
+      src/audio/mic_source_win.cpp
       src/zoom/zoom_client.cpp
       src/zoom/talkback_source.cpp
       src/zoom/talkback_sdk_win.cpp

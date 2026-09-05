@@ -1,4 +1,4 @@
-// The virtual mic. Seeds ZoomMicSource in plan §6.1.
+// The virtual mic. Seeds ZoomMicSource in plan section 6.1.
 //
 // IZoomSDKVirtualAudioMicEvent is a four-callback lifecycle and the rules are
 // not advisory:
@@ -13,7 +13,7 @@
 // this prevents is calling into a revoked pointer from the TX thread, which is
 // a crash rather than a glitch, and which a 20 ms cadence would find quickly.
 //
-// This class is a FrameSink, which is what lets the same TxPacer drive Zoom,
+// This class is a VirtualMic, which is what lets the same TxPacer drive Zoom,
 // a local output device, or a synthetic sink without knowing the difference.
 #pragma once
 
@@ -28,13 +28,13 @@
 #include <mutex>
 
 #include "rawdata/rawdata_audio_helper_interface.h"
-#include "tx_pacer.h"
+#include "virtual_mic.h"
 #include "zoom_sdk.h"
 
 namespace zc {
 
-class ZoomMicSource : public ZOOM_SDK_NAMESPACE::IZoomSDKVirtualAudioMicEvent,
-                      public FrameSink {
+class ZoomMicSourceWin : public VirtualMic,
+                         public ZOOM_SDK_NAMESPACE::IZoomSDKVirtualAudioMicEvent {
  public:
   // IZoomSDKVirtualAudioMicEvent
   void onMicInitialize(ZOOM_SDK_NAMESPACE::IZoomSDKAudioRawDataSender* sender) override;
@@ -46,10 +46,11 @@ class ZoomMicSource : public ZOOM_SDK_NAMESPACE::IZoomSDKVirtualAudioMicEvent,
   bool CanSend() override;
   bool Send(const int16_t* pcm, int samples) override;
 
-  bool initialised() const { return initialised_.load(); }
-  bool sending() const { return can_send_.load(); }
-  uint64_t send_failures() const { return send_failures_.load(); }
-  int last_error() const { return last_error_.load(); }
+  // VirtualMic
+  bool initialised() const override { return initialised_.load(); }
+  bool sending() const override { return can_send_.load(); }
+  uint64_t send_failures() const override { return send_failures_.load(); }
+  int last_error() const override { return last_error_.load(); }
 
  private:
   mutable std::mutex sender_m_;

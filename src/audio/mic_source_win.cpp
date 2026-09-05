@@ -1,4 +1,4 @@
-#include "mic_source.h"
+#include "mic_source_win.h"
 
 #include <cstdio>
 
@@ -8,7 +8,7 @@ using namespace ZOOM_SDK_NAMESPACE;
 
 namespace zc {
 
-void ZoomMicSource::onMicInitialize(IZoomSDKAudioRawDataSender* sender) {
+void ZoomMicSourceWin::onMicInitialize(IZoomSDKAudioRawDataSender* sender) {
   {
     std::lock_guard<std::mutex> lock(sender_m_);
     sender_ = sender;
@@ -17,17 +17,17 @@ void ZoomMicSource::onMicInitialize(IZoomSDKAudioRawDataSender* sender) {
   std::printf("[mic] onMicInitialize -- sender acquired\n");
 }
 
-void ZoomMicSource::onMicStartSend() {
+void ZoomMicSourceWin::onMicStartSend() {
   can_send_.store(true);
   std::printf("[mic] onMicStartSend -- send window OPEN\n");
 }
 
-void ZoomMicSource::onMicStopSend() {
+void ZoomMicSourceWin::onMicStopSend() {
   can_send_.store(false);
   std::printf("[mic] onMicStopSend -- send window CLOSED\n");
 }
 
-void ZoomMicSource::onMicUninitialized() {
+void ZoomMicSourceWin::onMicUninitialized() {
   // Order matters. Shut the gate before dropping the pointer, so a TX thread
   // that has already passed CanSend() cannot reach a null sender_ -- and take
   // the same lock Send() takes, so one that is already inside finishes first.
@@ -40,11 +40,11 @@ void ZoomMicSource::onMicUninitialized() {
   std::printf("[mic] onMicUninitialized -- sender revoked\n");
 }
 
-bool ZoomMicSource::CanSend() {
+bool ZoomMicSourceWin::CanSend() {
   return can_send_.load() && initialised_.load();
 }
 
-bool ZoomMicSource::Send(const int16_t* pcm, int samples) {
+bool ZoomMicSourceWin::Send(const int16_t* pcm, int samples) {
   std::lock_guard<std::mutex> lock(sender_m_);
   // Re-checked under the lock. CanSend() was a hint taken by the pacer some
   // instant earlier, and onMicStopSend can land in between.
