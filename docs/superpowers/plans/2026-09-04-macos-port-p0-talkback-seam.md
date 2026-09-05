@@ -1302,7 +1302,7 @@ The last piece of the seam. Compiles and links against the real macOS SDK; it is
 - Modify: `CMakeLists.txt`
 
 **Interfaces:**
-- Consumes: `zc::TalkbackSdk`, `zc::TalkbackSdkEvents`, `zc::TalkbackCall`, `zc::TalkbackEvent`.
+- Consumes: `zc::TalkbackSdk`, `zc::TalkbackSdkEvents`, `zc::TalkbackResult`, `zc::TalkbackCall`, `zc::TalkbackEvent`.
 - Produces: `zc::TalkbackSdkMac` (constructor takes `ZoomSDKTalkbackController*` as an opaque `void*` at the C++ boundary — see Step 1).
 
 - [ ] **Step 1: Write the header**
@@ -1341,16 +1341,16 @@ class TalkbackSdkMac : public TalkbackSdk {
 
   void SetEvents(TalkbackSdkEvents* events) override;
   bool MeetingSupportsTalkback() override;
-  TalkbackCall CreateChannels(unsigned int count) override;
-  TalkbackCall InviteUsers(const std::string& channel_id,
+  TalkbackResult CreateChannels(unsigned int count) override;
+  TalkbackResult InviteUsers(const std::string& channel_id,
                            const std::vector<unsigned int>& user_ids) override;
-  TalkbackCall RemoveUsers(const std::string& channel_id,
+  TalkbackResult RemoveUsers(const std::string& channel_id,
                            const std::vector<unsigned int>& user_ids) override;
-  TalkbackCall DestroyChannels(
+  TalkbackResult DestroyChannels(
       const std::vector<std::string>& channel_ids) override;
-  TalkbackCall SendAudio(const std::string& channel_id, const int16_t* pcm,
+  TalkbackResult SendAudio(const std::string& channel_id, const int16_t* pcm,
                          int samples) override;
-  TalkbackCall SetChannelBackgroundVolume(const std::string& channel_id,
+  TalkbackResult SetChannelBackgroundVolume(const std::string& channel_id,
                                           float volume) override;
 
  private:
@@ -1374,12 +1374,17 @@ class TalkbackSdkMac : public TalkbackSdk {
 
 namespace {
 
-zc::TalkbackCall FromZoomError(ZoomSDKError err) {
+// The normalised code the ladder branches on, PLUS the macOS SDK's own number
+// carried alongside for the operator. Windows' adapter does the same from its
+// own number space -- the two are not comparable, which is exactly why `raw`
+// is never compared or switched on above the seam.
+zc::TalkbackResult FromZoomError(ZoomSDKError err) {
+  const int raw = static_cast<int>(err);
   switch (err) {
-    case ZoomSDKError_Success: return zc::TalkbackCall::Ok;
-    case ZoomSDKError_TooFrequentCall: return zc::TalkbackCall::TooFrequent;
-    case ZoomSDKError_WrongUsage: return zc::TalkbackCall::WrongUsage;
-    default: return zc::TalkbackCall::Failed;
+    case ZoomSDKError_Success: return {zc::TalkbackCall::Ok, raw};
+    case ZoomSDKError_TooFrequentCall: return {zc::TalkbackCall::TooFrequent, raw};
+    case ZoomSDKError_WrongUsage: return {zc::TalkbackCall::WrongUsage, raw};
+    default: return {zc::TalkbackCall::Failed, raw};
   }
 }
 
@@ -1493,13 +1498,13 @@ bool TalkbackSdkMac::MeetingSupportsTalkback() {
       isMeetingSupportTalkBack];
 }
 
-TalkbackCall TalkbackSdkMac::CreateChannels(unsigned int count) {
+TalkbackResult TalkbackSdkMac::CreateChannels(unsigned int count) {
   if (controller_ == nullptr) return TalkbackCall::NoController;
   return FromZoomError([((__bridge ZoomSDKTalkbackController*)controller_)
       createChannel:count]);
 }
 
-TalkbackCall TalkbackSdkMac::InviteUsers(
+TalkbackResult TalkbackSdkMac::InviteUsers(
     const std::string& channel_id, const std::vector<unsigned int>& user_ids) {
   if (controller_ == nullptr) return TalkbackCall::NoController;
   if (user_ids.empty()) return TalkbackCall::Ok;
@@ -1514,7 +1519,7 @@ TalkbackCall TalkbackSdkMac::InviteUsers(
                 userIDList:ids]);
 }
 
-TalkbackCall TalkbackSdkMac::RemoveUsers(
+TalkbackResult TalkbackSdkMac::RemoveUsers(
     const std::string& channel_id, const std::vector<unsigned int>& user_ids) {
   if (controller_ == nullptr) return TalkbackCall::NoController;
   if (user_ids.empty()) return TalkbackCall::Ok;
@@ -1528,7 +1533,7 @@ TalkbackCall TalkbackSdkMac::RemoveUsers(
                   userIDList:ids]);
 }
 
-TalkbackCall TalkbackSdkMac::DestroyChannels(
+TalkbackResult TalkbackSdkMac::DestroyChannels(
     const std::vector<std::string>& channel_ids) {
   if (controller_ == nullptr) return TalkbackCall::NoController;
   if (channel_ids.empty()) return TalkbackCall::Ok;
@@ -1541,7 +1546,7 @@ TalkbackCall TalkbackSdkMac::DestroyChannels(
       destroyChannels:ids]);
 }
 
-TalkbackCall TalkbackSdkMac::SendAudio(const std::string& channel_id,
+TalkbackResult TalkbackSdkMac::SendAudio(const std::string& channel_id,
                                        const int16_t* pcm, int samples) {
   if (controller_ == nullptr) return TalkbackCall::NoController;
   // Mono, always. Stereo returns success and delivers nothing audible on
@@ -1555,7 +1560,7 @@ TalkbackCall TalkbackSdkMac::SendAudio(const std::string& channel_id,
                      channel:ZoomSDKAudioChannel_Mono]);
 }
 
-TalkbackCall TalkbackSdkMac::SetChannelBackgroundVolume(
+TalkbackResult TalkbackSdkMac::SetChannelBackgroundVolume(
     const std::string& channel_id, float volume) {
   if (controller_ == nullptr) return TalkbackCall::NoController;
   return FromZoomError([((__bridge ZoomSDKTalkbackController*)controller_)
