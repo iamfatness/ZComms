@@ -67,6 +67,7 @@ void TestReach();
 void TestSignalProtocol();
 void TestSignalOutbox();
 void TestDuckPlan();
+void TestTalkbackChannels();
 void TestSignalGate();
 void TestChannelMix();
 void TestExternFeed();

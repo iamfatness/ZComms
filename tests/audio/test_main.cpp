@@ -15,6 +15,7 @@ int main() {
   TestSignalProtocol();
   TestSignalOutbox();
   TestDuckPlan();
+  TestTalkbackChannels();
   TestSignalGate();
   TestChannelMix();
   TestExternFeed();
