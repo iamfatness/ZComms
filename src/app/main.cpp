@@ -60,7 +60,6 @@
 #include "roster.h"
 #include "signal.h"
 #include "talkback_channels.h"
-#include "talkback_sdk_win.h"
 #include "tx_pacer.h"
 #include "ui_html.h"
 #include "zoom_client_win.h"
@@ -1878,6 +1877,9 @@ int Run(int argc, char** argv) {
     }
     if (ui) {
       SetMainPhase("publish panel state");
+      // Six raw Zoom statuses collapse to IDLE here (session_alive() is
+      // already false for all of them, so at most one frame is affected) --
+      // see docs/plans/2026-09-05-macos-port-p1a-followups.md N1.
       std::string status = MeetingStateName(zoom.state());
       for (char& c : status) {
         if (c == '_') c = ' ';

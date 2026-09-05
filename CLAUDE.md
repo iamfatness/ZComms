@@ -675,6 +675,13 @@ session-scoped, never static — user ids are meeting-scoped and recycled.
   as `SDK_UT_WITHOUT_LOGIN` and lands in the waiting room; someone has to
   click admit. Turn the waiting room off before an unattended run, and watch
   the 40-minute limit on basic accounts — it ends the meeting underneath you.
+- **A verification grep scoped to `src/` misses real consumers twice now.**
+  `spikes/a-tx-latency` builds on the Windows CI job and links `zcomms_zoom`,
+  so a consumer of a changed Zoom interface living there breaks the Windows
+  build exactly like one in `src/` would. This cost two red Windows runs
+  (Task 1 and Task 4 of the P1-A client-seam work) before it was called out.
+  Any "does anything else call this" check in this repo must grep `src/`,
+  `spikes/` **and** `tests/` — never just `src/`.
 
 ## What this project is not
 

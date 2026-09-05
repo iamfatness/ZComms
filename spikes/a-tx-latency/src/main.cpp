@@ -25,7 +25,6 @@
 #include "config.h"
 #include "generator.h"
 #include "loopback.h"
-#include "mic_source_win.h"
 #include "probe.h"
 #include "signal.h"
 #include "stats.h"
