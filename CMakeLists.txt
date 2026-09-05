@@ -60,13 +60,32 @@ add_library(zcomms_audio STATIC
   src/audio/channel_mix.cpp
   src/audio/extern_feed.cpp
   src/audio/devices.cpp
-  src/audio/loopback.cpp
   src/audio/wav_sink.cpp
   src/audio/engine.cpp
   src/audio/miniaudio_impl.cpp
 )
+
+# loopback is WASAPI render-stream capture. macOS has no OS-level equivalent
+# without installing a virtual driver, and it costs nothing to drop: it feeds
+# the latency-measurement tools (zcomms-tap, --calibrate), not the shipping
+# audio path. engine.cpp records that the echo canceller runs reference-
+# starved (passthrough) on BOTH platforms today, so macOS without loopback
+# behaves exactly as Windows does. See docs/plans/2026-09-04-macos-port.md §2.
+if(NOT APPLE)
+  target_sources(zcomms_audio PRIVATE src/audio/loopback.cpp)
+endif()
+
 target_include_directories(zcomms_audio PUBLIC src/audio "${MINIAUDIO_DIR}")
 target_link_libraries(zcomms_audio PUBLIC speexdsp)
+
+if(APPLE)
+  # miniaudio's CoreAudio backend. Without these the link fails on AudioUnit
+  # and AudioObjectGetPropertyData symbols rather than at compile time.
+  target_link_libraries(zcomms_audio PUBLIC
+    "-framework CoreAudio"
+    "-framework AudioToolbox"
+    "-framework CoreFoundation")
+endif()
 
 # PUBLIC, and set here rather than in a source file: these macros change the
 # layout of ma_device and ma_device_config, so a translation unit that sees
@@ -189,21 +208,33 @@ endif()
 # ---------------------------------------------------------------------------
 # zcomms-tap: end-to-end verifier's far end. Taps every playback endpoint and
 # detects the --test-signal beep pattern. No SDK needed.
+#
+# Windows-only for now: main.cpp includes <windows.h> directly (console/
+# device-name handling never ported), so it fails to compile on Apple --
+# `fatal error: 'windows.h' file not found`. Porting the tool itself is out
+# of this task's scope (it drives loopback, which is dropped on macOS too).
 # ---------------------------------------------------------------------------
-add_executable(zcomms-tap tools/tap-detect/main.cpp)
-target_link_libraries(zcomms-tap PRIVATE zcomms_audio)
-if(MSVC)
-  target_compile_options(zcomms-tap PRIVATE /W4 /permissive- /utf-8)
+if(NOT APPLE)
+  add_executable(zcomms-tap tools/tap-detect/main.cpp)
+  target_link_libraries(zcomms-tap PRIVATE zcomms_audio)
+  if(MSVC)
+    target_compile_options(zcomms-tap PRIVATE /W4 /permissive- /utf-8)
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------
 # Engine CLI. Drives the engine with no UI and no meeting.
+#
+# Windows-only for now, same reason as zcomms-tap above: main.cpp includes
+# <windows.h> directly and fails to compile on Apple.
 # ---------------------------------------------------------------------------
-add_executable(zcomms-engine tools/engine-cli/main.cpp)
-target_link_libraries(zcomms-engine PRIVATE zcomms_audio)
-if(MSVC)
-  target_compile_options(zcomms-engine PRIVATE /W4 /permissive- /utf-8)
-  target_link_libraries(zcomms-engine PRIVATE winmm)
+if(NOT APPLE)
+  add_executable(zcomms-engine tools/engine-cli/main.cpp)
+  target_link_libraries(zcomms-engine PRIVATE zcomms_audio)
+  if(MSVC)
+    target_compile_options(zcomms-engine PRIVATE /W4 /permissive- /utf-8)
+    target_link_libraries(zcomms-engine PRIVATE winmm)
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -226,16 +257,29 @@ add_executable(zcomms_audio_tests
   tests/zoom/test_signal_protocol.cpp
   tests/zoom/test_signal_outbox.cpp
   tests/zoom/test_duck_plan.cpp
-  tests/audio/test_crash_trap.cpp
   tests/app/test_diag.cpp
-  src/app/crash_trap.cpp
-  src/app/diag_log.cpp
   src/zoom/room_plan.cpp
   src/zoom/reach.cpp
   src/zoom/signal_protocol.cpp
   src/zoom/signal_outbox.cpp
   src/zoom/duck_plan.cpp
 )
+
+# crash_trap/diag_log (and the test that exercises them) are Windows-only:
+# crash_trap.cpp installs SEH handlers and diag_log.cpp is built on HANDLE/
+# WriteFile, and test_crash_trap.cpp itself needs <io.h> for _close(). All
+# three fail to compile on Apple -- `fatal error: 'windows.h'/'io.h' file
+# not found` -- and porting the crash trap is a later task, not this one.
+# test_diag.cpp is unaffected: it exercises console_queue.h/diag_line.h/
+# log_parts.h/stall_watch.h, which are header-only and platform-neutral.
+if(NOT APPLE)
+  target_sources(zcomms_audio_tests PRIVATE
+    tests/audio/test_crash_trap.cpp
+    src/app/crash_trap.cpp
+    src/app/diag_log.cpp
+  )
+endif()
+
 target_link_libraries(zcomms_audio_tests PRIVATE zcomms_audio)
 # src/zoom on the include path for the SDK-FREE zoom headers only
 # (room_plan.h, reach.h); anything including SDK headers stays out of this

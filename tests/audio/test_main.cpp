@@ -18,7 +18,11 @@ int main() {
   TestSignalGate();
   TestChannelMix();
   TestExternFeed();
+#ifndef __APPLE__
+  // crash_trap.cpp is Windows-only (SEH handlers, <windows.h>) and is left
+  // out of the macOS build (see CMakeLists.txt); porting it is a later task.
   TestCrashTrap();
+#endif
   TestDiag();
 
   const auto& failures = zctest::Failures();

@@ -1,0 +1,29 @@
+name: macos
+
+on:
+  push:
+    branches: [main, macos-port]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      # No Zoom SDK here yet. zcomms_audio_tests links no sdk.lib by design,
+      # so the whole suite runs without it. The SDK-dependent targets arrive
+      # with the macOS adapter (Task 6).
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build tests
+        run: cmake --build build --target zcomms_audio_tests
+
+      # Scoped to zcomms_audio_tests: `ctest` with no filter also picks up
+      # spike_a_tests (registered by spikes/a-tx-latency's CMakeLists, added
+      # unconditionally), which this job never builds -- an unscoped run
+      # reports "Could not find executable" and exits 8. That harness is a
+      # separate subsystem outside this task's scope.
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -R '^zcomms_audio_tests$'
