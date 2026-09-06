@@ -12,6 +12,7 @@ int main() {
   TestAec();
   TestRoomPlan();
   TestReach();
+  TestTalkbackEligibility();
   TestSignalProtocol();
   TestSignalOutbox();
   TestDuckPlan();

@@ -81,3 +81,6 @@ jobs:
       # `ctest` finds everything the Build step just produced.
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Test talent panel
+        run: node tests/app/test_talent_panel.js

@@ -1,5 +1,17 @@
 # CLAUDE.md
 
+## Talent eligibility (2026-09-06)
+
+The panel roster and assignment policy include only participants whose SDK
+`IsSupportTalkback()` capability is true, excluding the station itself.
+Unsupported/unknown participants are not disabled talent entries and must
+not be manually or automatically assigned. `talkback_eligibility.h` owns
+the shared policy; housekeeping refreshes capabilities and clears intent
+for known-ineligible users. Channel labels/counts exclude their stale SDK
+membership while the healer removes it. Missing room-local participants
+remain distinct from known-ineligible ones, preserving breakout membership.
+Run CTest plus `node tests/app/test_talent_panel.js` for regression coverage.
+
 Project notes for Claude Code sessions working in this repository: **ZComms**,
 a standalone intercom built on the Zoom Meeting SDK. Update this file in the
 same change as any substantive work — docs-updated is part of done.

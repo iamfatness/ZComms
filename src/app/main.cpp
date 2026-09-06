@@ -1434,7 +1434,6 @@ int Run(int argc, char** argv) {
   // membership on the housekeeping cadence.
   std::set<std::pair<int, unsigned int>> intent;
   std::set<unsigned int> auto_assigned;
-  std::set<unsigned int> warned_no_talkback;
   int64_t next_house_ns = 0;
   // Per-(slot,person) invite pacing: {attempts, earliest next try}. Zoom
   // rate-limits back-to-back talkback calls; hammering a refusal every
@@ -1505,6 +1504,7 @@ int Run(int argc, char** argv) {
     if (NowNs() >= next_house_ns) {
       SetMainPhase("housekeeping");
       next_house_ns = NowNs() + 2'000'000'000LL;
+      roster.Refresh();
       zoom.AdmitAllWaiting();  // no-op unless we are host
 
       // Room truth, refreshed with the housekeeping cadence.
@@ -1528,6 +1528,11 @@ int Run(int argc, char** argv) {
                  uerr);
         }
       }
+
+      // A known-ineligible participant must lose assignment intent even
+      // during breakouts. Do not confuse missing room-local users with this.
+      PruneIneligibleTalkbackIntent(roster.others(), cfg.display_name,
+                                    intent, auto_assigned);
 
       // Prune intent for people no longer here: user ids are meeting-scoped
       // and recycled (plan §5) -- a stale id must not keep a channel
@@ -1556,7 +1561,8 @@ int Run(int argc, char** argv) {
       const std::vector<ChannelState> asnap = bank.Snapshot();
       const int nslots = static_cast<int>(asnap.size());
       const auto slot_load = [&](int s) {
-        std::set<unsigned int> ids = asnap[static_cast<size_t>(s)].members;
+        std::set<unsigned int> ids = EligibleChannelMembers(
+            asnap[static_cast<size_t>(s)].members, roster.others(), cfg.display_name);
         for (const auto& iv : intent) {
           if (iv.first == s) ids.insert(iv.second);
         }
@@ -1566,13 +1572,7 @@ int Run(int argc, char** argv) {
         // Inside a breakout the SDK can list this station itself under a
         // fresh id -- auto-assigning it drew a self-invite (code 3, live
         // 2026-08-30). Our own name is never talent.
-        if (m.name == cfg.display_name) continue;
-        if (!m.supports_talkback) {
-          if (warned_no_talkback.insert(m.user_id).second) {
-            log_op(m.name + " cannot receive talkback (web client) -- skipped");
-          }
-          continue;
-        }
+        if (!IsTalkbackEligible(m, cfg.display_name)) continue;
         if (auto_assigned.insert(m.user_id).second) {
           int pick = -1, best = 1 << 30;
           for (int s = 0; s < nslots; ++s) {
@@ -1617,7 +1617,8 @@ int Run(int argc, char** argv) {
         unsigned int to_remove = 0;
         bool have_remove = false;
         for (const RosterMember& m : roster.others()) {
-          const bool want = intent.count({s, m.user_id}) != 0;
+          const bool want = IsTalkbackEligible(m, cfg.display_name) &&
+                            intent.count({s, m.user_id}) != 0;
           const bool have =
               snap[static_cast<size_t>(s)].members.count(m.user_id) != 0;
           if (want && have) invite_backoff.erase({s, m.user_id});
@@ -1698,8 +1699,11 @@ int Run(int argc, char** argv) {
         }
       }
       for (const auto& [slot, uid, on] : aedges) {
-        if (on) intent.insert({slot, uid});
-        else intent.erase({slot, uid});
+        if (!on) intent.erase({slot, uid});
+        else if (CanAssignTalkback(roster.others(), cfg.display_name,
+                                   uid, slot, n_channels)) {
+          intent.insert({slot, uid});
+        }
       }
     }
 
@@ -1900,12 +1904,15 @@ int Run(int argc, char** argv) {
       // A channel whose whole population is one person is that person's
       // direct line; its key wears their name.
       std::map<unsigned int, std::string> names;
-      for (const RosterMember& m : roster.others()) names[m.user_id] = m.name;
+      for (const RosterMember& m : roster.others()) {
+        if (IsTalkbackEligible(m, cfg.display_name)) names[m.user_id] = m.name;
+      }
       const auto channel_label = [&](int s) -> std::string {
         std::set<unsigned int> ids = snap[static_cast<size_t>(s)].members;
         for (const auto& iv : intent) {
           if (iv.first == s) ids.insert(iv.second);
         }
+        ids = EligibleChannelMembers(std::move(ids), roster.others(), cfg.display_name);
         if (ids.size() != 1) return "";
         const auto it = names.find(*ids.begin());
         return it == names.end() ? "" : it->second;
@@ -2012,7 +2019,8 @@ int Run(int argc, char** argv) {
           j += "]},";
         }
         j += std::string("\"ready\":") + (c.ready ? "true," : "false,");
-        j += "\"listeners\":" + std::to_string(c.listeners) + ",";
+        j += "\"listeners\":" + std::to_string(EligibleChannelMembers(
+            c.members, roster.others(), cfg.display_name).size()) + ",";
         j += std::string("\"keyed\":") +
              (((keys >> s) & 1u) ? "true," : "false,");
         j += std::string("\"latched\":") +
@@ -2021,6 +2029,7 @@ int Run(int argc, char** argv) {
       j += "],\"roster\":[";
       first = true;
       for (const RosterMember& m : roster.others()) {
+        if (!IsTalkbackEligible(m, cfg.display_name)) continue;
         if (!first) j += ",";
         first = false;
         j += "{\"name\":\"" + JsonEscape(m.name) + "\",";
