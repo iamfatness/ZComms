@@ -27,6 +27,8 @@ currently unsigned, so Windows SmartScreen may prompt on first launch.
 
 - **Person-based talk keys.** Eligible participants are assigned to individual
   talkback channels as capacity allows, with their names on the panel.
+  On current `main`, only participants confirmed to support talkback appear
+  in the talent list or can be assigned; unsupported participants are omitted.
 - **Direct, group, and all-call comms.** Hold a person's key, latch a channel,
   or key the whole bank. EDIT TALENT lets you change channel membership and
   create shared lines. Zoom supports up to 16 channels with 10 listeners each.

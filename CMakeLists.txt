@@ -314,6 +314,7 @@ add_executable(zcomms_audio_tests
   tests/audio/test_extern_feed.cpp
   tests/zoom/test_room_plan.cpp
   tests/zoom/test_reach.cpp
+  tests/zoom/test_talkback_eligibility.cpp
   tests/zoom/test_signal_protocol.cpp
   tests/zoom/test_signal_outbox.cpp
   tests/zoom/test_duck_plan.cpp

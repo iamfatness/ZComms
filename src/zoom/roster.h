@@ -19,6 +19,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include "talkback_eligibility.h"
 
 // The participants header uses AudioType without including the header that
 // defines it, so the audio interface must come first.
@@ -26,17 +27,6 @@
 #include "meeting_service_components/meeting_participants_ctrl_interface.h"
 
 namespace zc {
-
-struct RosterMember {
-  unsigned int user_id = 0;
-  std::string name;
-  bool is_host = false;
-  // Per-user talkback capability (IUserInfo::IsSupportTalkback). Live-observed
-  // false for the Zoom web client: inviting an unsupported participant fails
-  // with SDKERR_INVALID_PARAMETER, so the app filters on this rather than
-  // burning an invite to learn it.
-  bool supports_talkback = false;
-};
 
 class Roster : public ZOOM_SDK_NAMESPACE::IMeetingParticipantsCtrlEvent {
  public:
@@ -50,6 +40,9 @@ class Roster : public ZOOM_SDK_NAMESPACE::IMeetingParticipantsCtrlEvent {
   // Set when membership changed since the last call; reading clears it. The
   // app polls this once per loop and re-heals channel membership when true.
   bool ConsumeDirty();
+
+  // Periodic capability refresh; Zoom has no capability-change callback here.
+  void Refresh();
 
   // IMeetingParticipantsCtrlEvent
   void onUserJoin(ZOOM_SDK_NAMESPACE::IList<unsigned int>* ids,
@@ -86,8 +79,6 @@ class Roster : public ZOOM_SDK_NAMESPACE::IMeetingParticipantsCtrlEvent {
   void onGrantCoOwnerPrivilegeChanged(bool) override {}
 
  private:
-  void Refresh();
-
   ZOOM_SDK_NAMESPACE::IMeetingParticipantsController* controller_ = nullptr;
   std::vector<RosterMember> others_;
   unsigned int self_id_ = 0;
