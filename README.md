@@ -168,6 +168,12 @@ With the Zoom SDK present, the build includes the `zcomms` desktop app.
 Without it, the audio engine, SDK-independent tests, and diagnostic tools
 still build. `tools/release.ps1` stages the Windows ZIP and NSIS installer.
 
+After building with the SDK, `tools/smoke-windows.ps1 -Meeting <id>` is the
+acceptance test for any change that touches how `main.cpp` constructs and
+joins: it joins a real meeting, brings a channel bank up, keys a channel, and
+asserts Zoom actually accepted audio and carried a signal, not just that the
+build succeeded. It needs a machine already signed in to Zoom; see its `.NOTES`.
+
 ### macOS development
 
 The current macOS target is the engine and talkback adapter, not an
