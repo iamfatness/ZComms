@@ -56,6 +56,18 @@ Note the related change P0 did make: `controller_ == nullptr` became
 and the send paths take `send_m_` and increment `send_failures_` where the
 original left them at zero. Only observable with a fake.
 
+**Update, P1-A:** "unreachable in the app" stopped being an invariant of
+the class and became an invariant of one caller. `ZoomClientWin::
+MakeTalkbackSdk()` (added in P1-A) can now return `nullptr`, and
+`main.cpp` passes that pointer straight into `TalkbackChannels`'s
+constructor — the exact `sdk_ == nullptr` precondition this entry called
+unreachable is now a real return value, one missing early-return away from
+every one of these four call sites. Still non-fatal today only because
+`main.cpp`'s `!meeting_supports_talkback()` check (itself guarded) returns
+first. See `docs/plans/2026-09-05-macos-port-p1a-followups.md`'s
+"B2-refile" entry for the full argument; this line exists so a reader who
+lands on B2 first does not stop at "unreachable."
+
 ---
 
 ## Robustness, unreachable today

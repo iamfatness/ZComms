@@ -1,8 +1,15 @@
 name: windows
 
+# No branches: filter on push. A branch allow-list silently removes the gate
+# on any branch nobody remembered to add -- exactly what happened to
+# macos-port-p1, which ran zero CI for its entire history until this line was
+# noticed missing. The Windows-correctness argument for this whole port is
+# "the change is mechanical PLUS CI"; a gate that never runs demotes that to
+# just "mechanical". Trade-off: a same-repo PR now produces two runs of each
+# workflow (one from push, one from pull_request) -- accepted, because a
+# duplicate run is cheap and a silently-skipped gate is not.
 on:
   push:
-    branches: [main, macos-port]
   pull_request:
 
 jobs:

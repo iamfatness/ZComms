@@ -74,3 +74,4 @@ void TestChannelMix();
 void TestExternFeed();
 void TestCrashTrap();
 void TestDiag();
+void TestVirtualMic();
