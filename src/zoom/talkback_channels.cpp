@@ -268,7 +268,10 @@ void TalkbackChannels::OnChannelUserJoinResponse(const std::string& channel_id,
   const int slot = SlotForId(id);
   if (slot < 0) return;
   ChannelState& c = channels_[static_cast<size_t>(slot)];
-  if (error == TalkbackEvent::Ok) {
+  // ALREADY_EXIST is confirmed presence (talkback_sdk.h): not recording it
+  // left the healer's `want && !have` true forever and it re-invited the
+  // same person every 5-60 s, burning the per-call rate-limit budget (Law 2).
+  if (error == TalkbackEvent::Ok || error == TalkbackEvent::AlreadyExists) {
     c.members.insert(user_id);
     c.listeners = static_cast<int>(c.members.size());
   } else {

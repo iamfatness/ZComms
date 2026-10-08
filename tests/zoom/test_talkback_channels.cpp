@@ -101,26 +101,21 @@ void TestTalkbackChannels() {
     ZC_CHECK(ch.Snapshot()[0].members.count(101) == 1u);
   }
 
-  ZC_TEST("ALREADY_EXIST does NOT record presence -- pins a known bug");
+  ZC_TEST("ALREADY_EXIST is confirmed presence and is recorded as a member");
   {
-    // This pins what the code DOES, which is not what it should do.
-    //
-    // A member is recorded only on TalkbackEvent::Ok; every other response
-    // just sets last_error_. So when Zoom answers an invite with
-    // ALREADY_EXIST -- meaning the person IS in the channel -- the ladder
-    // does not record them, `want && !have` stays true, and the healer
-    // re-invites the same person every 5-60s for the life of the session,
-    // spending the rate-limit budget that Law 2 exists to protect.
-    //
-    // It contradicts talkback_sdk.h's own contract ("Confirmed presence.
-    // NEVER retried"). Fixing it is a BEHAVIOUR change and this plan is a
-    // move-only port, so the fix is filed separately and needs its own live
-    // verification. Owner ruling 2026-09-05: pin reality, file the bug.
-    // When that fix lands, this test inverts to == 1u and the comment goes.
     FakeTalkbackSdk fake;
     TalkbackChannels ch(&fake);
     BringUp(&fake, &ch, 1);
     fake.EmitUserJoined("guid-0", 101, TalkbackEvent::AlreadyExists);
+    ZC_CHECK(ch.Snapshot()[0].members.count(101) == 1u);
+  }
+
+  ZC_TEST("other join refusals do not record presence");
+  {
+    FakeTalkbackSdk fake;
+    TalkbackChannels ch(&fake);
+    BringUp(&fake, &ch, 1);
+    fake.EmitUserJoined("guid-0", 101, TalkbackEvent::Rejected);
     ZC_CHECK(ch.Snapshot()[0].members.count(101) == 0u);
   }
 
