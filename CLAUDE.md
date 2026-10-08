@@ -431,6 +431,8 @@ one `InviteMany` batch per channel per pass, per-(channel,person) backoff
 (5s doubling to 60s; 10s patience after a successful Execute for the async
 confirmation), prune intent/backoff when a person leaves (ids recycle).
 
+**`ALREADY_EXIST` on an invite is confirmed presence (#46, 2026-10-08):** `OnChannelUserJoinResponse` records the member on it exactly as on `Ok`. It used to record only `Ok`, so the healer's `want && !have` stayed true and it re-invited the same person every 5-60 s. Unit-pinned; NOT yet live-verified in a meeting.
+
 **The direct-talk model:** the full 16-channel bank is provisioned up front
 in ONE CreateChannel(16) request (keying must only SELECT); each capable
 participant auto-lands on their OWN channel so their key wears their name;
